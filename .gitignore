@@ -1,0 +1,14 @@
+# 모델 체크포인트 파일 제외
+*.pth
+*.pt
+*.h5
+
+# 가상환경 및 캐시
+__pycache__/
+venv/
+.venv/
+.DS_Store
+
+# 에디터 관련 설정 (추가 추천)
+.cursor/
+.vscode/
