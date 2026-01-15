@@ -90,7 +90,7 @@ class Florence2Model(nn.Module):
             model_name,
             trust_remote_code=True
         )
-        
+
         # Extract vision encoder
         # Florence-2 structure: model has vision_tower (vision encoder) and language_model (text encoder/decoder)
         

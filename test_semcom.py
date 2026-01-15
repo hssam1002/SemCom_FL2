@@ -108,21 +108,11 @@ def test_semantic_communication():
     print("Processing Pipeline")
     print("=" * 70)
     
-    print("\n[Step 1] Preprocessing image...")
-    try:
-        image_tensor = preprocess_image(image, normalize=True, device=device)
-        print(f"✓ Image preprocessed: {image_tensor.shape}")
-    except Exception as e:
-        print(f"✗ Failed to preprocess image: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-    
-    # Transmitter: Image -> Vision Embedding
-    print("\n[Step 2] Transmitter: Encoding image to vision embedding...")
+    print("\n[Step 1] Transmitter: Encoding image to vision embedding...")
+    # Transmitter now handles image preprocessing internally using processor
     try:
         with torch.no_grad():
-            tx_output = transmitter(image_tensor)
+            tx_output = transmitter(image)  # Pass PIL Image directly
         print(f"✓ Transmitter output shape: {tx_output.shape}")
         print(f"  Vision embedding generated successfully")
     except Exception as e:
@@ -161,43 +151,39 @@ def test_semantic_communication():
     for task_prompt, task_name in tasks:
         print(f"\n--- Testing {task_name} ({task_prompt}) ---")
         
-        # Receiver processing
+        # Receiver processing: use same generate flow as reference, but with Tx features
         receiver_result = None
         try:
             with torch.no_grad():
-                # Receiver processes: received_vision_embedding + task_prompt
+                # For debugging: get merged encoder input (not used directly for decoding)
                 rx_output = receiver(received_signal, [task_prompt])
-            
             print(f"  ✓ Receiver output shape: {rx_output.shape}")
-            
-            # Generate text from receiver output using language model's lm_head
-            # The receiver output is the last hidden state, we need to get logits
-            if hasattr(florence2_model.model, 'language_model') and hasattr(florence2_model.model.language_model, 'lm_head'):
-                # Get logits from receiver output
-                # Use the last token of the task embeddings part (after vision tokens)
-                # Or use the entire output and get logits
-                logits = florence2_model.model.language_model.lm_head(rx_output)
-                
-                # Get token IDs from logits (greedy decoding)
-                predicted_ids = torch.argmax(logits, dim=-1)
-                
-                # Decode to text
-                generated_text_receiver = florence2_model.processor.batch_decode(
-                    predicted_ids, skip_special_tokens=False
-                )[0]
-                
-                # Parse the result
-                receiver_result = florence2_model.processor.post_process_generation(
-                    generated_text_receiver,
-                    task=task_prompt,
-                    image_size=(image.width, image.height)
+
+            # Use receiver.generate() to run Florence-2 language_model.generate with merged embeddings
+            with torch.no_grad():
+                generated_ids_rx = receiver.generate(
+                    received_signal,
+                    [task_prompt],
+                    max_new_tokens=1024,
+                    num_beams=3,
+                    do_sample=False,
                 )
-            
+
+            # Decode and parse receiver output
+            generated_text_receiver = florence2_model.processor.batch_decode(
+                generated_ids_rx, skip_special_tokens=False
+            )[0]
+            receiver_result = florence2_model.processor.post_process_generation(
+                generated_text_receiver,
+                task=task_prompt,
+                image_size=(image.width, image.height)
+            )
+
         except Exception as e:
             print(f"  ✗ Receiver processing failed: {e}")
             import traceback
             traceback.print_exc()
-        
+
         # Reference (direct model generation)
         reference_result = None
         try:
@@ -206,7 +192,24 @@ def test_semantic_communication():
                 text=task_prompt,
                 images=image,
                 return_tensors="pt"
-            ).to(device, florence2_model.model.dtype)
+            )
+            # Move to device and dtype
+            # Note: input_ids should be Long, pixel_values should match model dtype
+            inputs = {}
+            for k, v in florence2_model.processor(
+                text=task_prompt,
+                images=image,
+                return_tensors="pt"
+            ).items():
+                if isinstance(v, torch.Tensor):
+                    if k == 'input_ids':
+                        # input_ids must be Long (int64)
+                        inputs[k] = v.to(device=device).long()
+                    else:
+                        # Other tensors (pixel_values) use model dtype
+                        inputs[k] = v.to(device=device, dtype=florence2_model.model.dtype)
+                else:
+                    inputs[k] = v
             
             # Generate using the model
             generated_ids = florence2_model.generate(

@@ -1,11 +1,12 @@
 """
 Transmitter module.
-Processes images through Florence-2 vision encoder and optionally applies linear embedding.
+Processes images through Florence-2 vision encoder up to image_proj_norm.
+Based on Florence-2's _encode_image method.
 """
 
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union, List
 
 from models.florence2_model import Florence2Model
 
@@ -14,16 +15,20 @@ class Transmitter(nn.Module):
     """
     Transmitter for semantic communication.
     
-    Processes images through Florence-2 vision encoder and optionally
-    applies linear embedding to match task embedding dimension.
+    Processes images through Florence-2 vision encoder up to image_proj_norm.
+    Based on Florence-2's _encode_image implementation.
+    
+    Flow (matching Florence-2's _encode_image):
+    1. vision_tower.forward_features_unpool(pixel_values)
+    2. image_pos_embed (if applicable)
+    3. visual_temporal_embed (if applicable)
+    4. image_feature_source pooling (spatial_avg_pool, temporal_avg_pool, last_frame)
+    5. image_projection
+    6. image_proj_norm
     
     Args:
         florence2_model: Florence-2 model instance
-        task_embedding_dim: Dimension of task embedding
-        include_linear_embedding: Whether to include linear embedding layer
-                                 to match task embedding dimension
-        use_pooled_features: Whether to use pooled features (CLS token) 
-                             instead of full sequence
+        use_pooled_features: Whether to use pooled features (deprecated, kept for compatibility)
     """
     
     def __init__(
@@ -43,69 +48,150 @@ class Transmitter(nn.Module):
         # Get vision encoder output dimension
         self.vision_dim = florence2_model.get_vision_dim()
         
-        # Optional linear embedding to match task embedding dimension
+        # After image_projection and image_proj_norm, output dimension is 768 (for base model)
+        self.output_dim = 768  # image_proj_norm output dimension
+        
         if include_linear_embedding:
-            if use_pooled_features:
-                # If using pooled features, input is (batch, vision_dim)
-                self.linear_embedding = nn.Linear(self.vision_dim, task_embedding_dim)
-            else:
-                # If using full sequence, input is (batch, seq_len, vision_dim)
-                # We'll apply linear to the last dimension
-                self.linear_embedding = nn.Linear(self.vision_dim, task_embedding_dim)
-        else:
-            self.linear_embedding = None
+            print("Warning: include_linear_embedding is ignored. Using image_proj_norm output (768 dim).")
+        self.linear_embedding = None
     
     def forward(
         self,
-        images: torch.Tensor
+        images: Union[torch.Tensor, List, "PIL.Image.Image"]
     ) -> torch.Tensor:
         """
-        Process images through vision encoder (DaViT).
+        Process images through vision encoder following Florence-2's _encode_image exactly.
         
-        This is the Transmitter part: Image -> Vision Encoder -> Vision Embedding
+        This replicates Florence-2's _encode_image method:
+        1. Use processor to preprocess images (resize, normalize, etc.)
+        2. vision_tower.forward_features_unpool
+        3. image_pos_embed (if applicable)
+        4. visual_temporal_embed (if applicable)
+        5. image_feature_source pooling
+        6. image_projection
+        7. image_proj_norm
         
         Args:
-            images: Input images tensor of shape (batch_size, 3, H, W)
+            images: Input images - can be:
+                - PIL Image or list of PIL Images
+                - torch.Tensor of shape (batch_size, 3, H, W) - already preprocessed
+                If PIL Image, will use processor to preprocess
             
         Returns:
-            Encoded vision features (vision embedding)
-            - If use_pooled_features=True: (batch_size, task_embedding_dim) or (batch_size, vision_dim)
-            - If use_pooled_features=False: (batch_size, seq_len, task_embedding_dim) or (batch_size, seq_len, vision_dim)
+            Encoded vision features after image_proj_norm (768 dimension)
+            Shape: (batch_size, seq_len, 768)
         """
-        # Encode images using Florence-2 vision encoder
-        vision_features, pooled_features = self.florence2_model.encode_image(
-            images,
-            return_pooled=True
-        )
+        model = self.florence2_model.model
+        processor = self.florence2_model.processor
         
-        # Choose between full sequence or pooled features
-        if self.use_pooled_features:
-            features = pooled_features  # (batch_size, vision_dim)
+        # Preprocess images using processor if needed
+        if not isinstance(images, torch.Tensor):
+            # images is PIL Image or list of PIL Images
+            # Use processor to preprocess (this ensures proper resize/crop for square feature maps)
+            if not isinstance(images, list):
+                images = [images]
+            
+            # Process images using processor (same as Florence-2 does)
+            inputs = processor(images=images, return_tensors="pt")
+            pixel_values = inputs["pixel_values"]
+            
+            # Move to device and dtype
+            device = next(model.parameters()).device
+            pixel_values = pixel_values.to(device=device, dtype=model.dtype)
         else:
-            features = vision_features  # (batch_size, seq_len, vision_dim)
+            # Already a tensor, just ensure dtype matches
+            pixel_values = images
+            if pixel_values.dtype != model.dtype:
+                pixel_values = pixel_values.to(dtype=model.dtype)
         
-        # Apply linear embedding if enabled
-        if self.include_linear_embedding and self.linear_embedding is not None:
-            if self.use_pooled_features:
-                # (batch_size, vision_dim) -> (batch_size, task_embedding_dim)
-                features = self.linear_embedding(features)
+        # Step 1: vision_tower.forward_features_unpool
+        # This matches Florence-2's _encode_image exactly
+        if len(pixel_values.shape) == 4:
+            batch_size, C, H, W = pixel_values.shape
+            T = 1
+            x = model.vision_tower.forward_features_unpool(pixel_values)
+        else:
+            raise ValueError(f'invalid image shape {pixel_values.shape}')
+        
+        # Step 2: image_pos_embed (if applicable)
+        # Note: This is applied BEFORE image_projection in Florence-2
+        # Florence-2's original code requires perfect square feature maps
+        if hasattr(model, 'image_pos_embed') and model.image_pos_embed is not None:
+            x = x.view(batch_size * T, -1, x.shape[-1])
+            num_tokens = x.shape[-2]
+            h = w = int(num_tokens ** 0.5)
+            
+            if h * w != num_tokens:
+                # Not a perfect square - Florence-2's original code asserts this
+                # We'll skip image_pos_embed for non-square feature maps
+                print(f"Warning: seq_len={num_tokens} is not a perfect square (h={h}, w={w}), "
+                      f"skipping image_pos_embed (Florence-2 requires square feature maps)")
+                x = x.view(batch_size, T * num_tokens, x.shape[-1])
             else:
-                # (batch_size, seq_len, vision_dim) -> (batch_size, seq_len, task_embedding_dim)
-                features = self.linear_embedding(features)
+                # Reshape to (batch_size * T, h, w, hidden_dim)
+                x = x.view(batch_size * T, h, w, x.shape[-1])
+                # Apply image_pos_embed
+                pos_embed = model.image_pos_embed(x)
+                # Add positional embeddings
+                x = x + pos_embed
+                # Reshape back to (batch_size, T * h*w, hidden_dim)
+                x = x.view(batch_size, T * h*w, x.shape[-1])
         
-        return features
+        # Step 3: visual_temporal_embed (if applicable)
+        if hasattr(model, 'visual_temporal_embed') and model.visual_temporal_embed is not None:
+            # visual_temporal_embed expects (batch, T, seq_len, hidden_dim)
+            # It applies to the first token: [:, :, 0]
+            x_reshaped = x.view(batch_size, T, -1, x.shape[-1])
+            visual_temporal_embed = model.visual_temporal_embed(x_reshaped[:, :, 0])
+            # Add temporal embeddings: broadcast to all tokens
+            x = x_reshaped + visual_temporal_embed.view(1, T, 1, x.shape[-1])
+            x = x.view(batch_size, T * x_reshaped.shape[2], x.shape[-1])
+        
+        # Step 4: image_feature_source pooling
+        # Florence-2 supports multiple feature sources: spatial_avg_pool, temporal_avg_pool, last_frame
+        x_feat_dict = {}
+        
+        x_reshaped = x.view(batch_size, T, -1, x.shape[-1])
+        spatial_avg_pool_x = x_reshaped.mean(dim=2)  # (batch, T, hidden_dim)
+        x_feat_dict['spatial_avg_pool'] = spatial_avg_pool_x
+        
+        temporal_avg_pool_x = x_reshaped.mean(dim=1)  # (batch, seq_len, hidden_dim)
+        x_feat_dict['temporal_avg_pool'] = temporal_avg_pool_x
+        
+        last_frame_x = x_reshaped[:, -1]  # (batch, seq_len, hidden_dim)
+        x_feat_dict['last_frame'] = last_frame_x
+        
+        # Get image_feature_source from config (default is usually ['last_frame'])
+        if hasattr(model, 'image_feature_source'):
+            image_feature_source = model.image_feature_source
+        else:
+            # Default to last_frame if not specified
+            image_feature_source = ['last_frame']
+        
+        new_x = []
+        for _image_feature_source in image_feature_source:
+            if _image_feature_source not in x_feat_dict:
+                raise ValueError(f'invalid image feature source: {_image_feature_source}')
+            new_x.append(x_feat_dict[_image_feature_source])
+        
+        x = torch.cat(new_x, dim=1)  # Concatenate along sequence dimension
+        
+        # Step 5: image_projection
+        x = x @ model.image_projection
+        
+        # Step 6: image_proj_norm
+        x = model.image_proj_norm(x)
+        
+        return x
     
     def get_output_dim(self) -> int:
         """
         Get output dimension of transmitter.
         
         Returns:
-            Output dimension
+            Output dimension (768 after image_proj_norm)
         """
-        if self.include_linear_embedding:
-            return self.task_embedding_dim
-        else:
-            return self.vision_dim
+        return self.output_dim  # Always 768 after image_proj_norm
     
     def get_output_shape(self, batch_size: int = 1, image_size: Tuple[int, int] = (224, 224)) -> Tuple[int, ...]:
         """
