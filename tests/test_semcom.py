@@ -3,15 +3,17 @@ Test script for full semantic communication pipeline.
 Tests: Image -> Transmitter -> Channel -> Receiver -> Task Execution
 
 Run this script from the project root directory:
-    python test_semcom.py
+    python tests/test_semcom.py
+    or
+    python -m tests.test_semcom
 """
 
 import sys
 import math
 from pathlib import Path
 
-# Ensure we can import from the project
-project_root = Path(__file__).parent.absolute()
+# Ensure we can import from the project root (parent directory)
+project_root = Path(__file__).parent.parent.absolute()
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
@@ -148,22 +150,49 @@ def test_semantic_communication():
     print("Task Results Comparison")
     print("=" * 70)
     
+    # Create all-zero dummy image for text embedding generation (shared between Tx/Rx)
+    # Note: Any image works - processor only checks if image is provided, not its content
+    import numpy as np
+    dummy_image = Image.fromarray(np.zeros((768, 768, 3), dtype=np.uint8))
+    print(f"\n[Shared] Created all-zero dummy image for text embedding generation")
+    
     for task_prompt, task_name in tasks:
         print(f"\n--- Testing {task_name} ({task_prompt}) ---")
+        
+        # Generate text embeddings at top level (shared between Tx/Rx)
+        # Use all-zero dummy image - processor only needs image presence, not content
+        print(f"  [Top Level] Encoding task prompt: {task_prompt}")
+        with torch.no_grad():
+            # Use processor with dummy image to get correct tokenization
+            inputs = florence2_model.processor(
+                text=[task_prompt],
+                images=[dummy_image],
+                return_tensors="pt"
+            )
+            input_ids = inputs["input_ids"].to(
+                device=device,
+                dtype=torch.long
+            )
+            embedding_layer = florence2_model.model.get_input_embeddings()
+            text_embeddings = embedding_layer(input_ids)
+        print(f"  ✓ Text embeddings shape: {text_embeddings.shape}")
+        print(f"  ✓ Text embeddings will be shared with Tx and Rx")
         
         # Receiver processing: use same generate flow as reference, but with Tx features
         receiver_result = None
         try:
             with torch.no_grad():
-                # For debugging: get merged encoder input (not used directly for decoding)
-                rx_output = receiver(received_signal, [task_prompt])
-            print(f"  ✓ Receiver output shape: {rx_output.shape}")
+                # Pass text_embeddings (from Tx) instead of task_prompt strings
+                merged_embeds, attention_mask = receiver(received_signal, text_embeddings)
+            print(f"  ✓ Receiver merged embeddings shape: {merged_embeds.shape}")
+            print(f"  ✓ Receiver attention mask shape: {attention_mask.shape}")
 
             # Use receiver.generate() to run Florence-2 language_model.generate with merged embeddings
+            # Pass text_embeddings (shared from top level)
             with torch.no_grad():
                 generated_ids_rx = receiver.generate(
                     received_signal,
-                    [task_prompt],
+                    text_embeddings,  # Use shared text_embeddings from top level
                     max_new_tokens=1024,
                     num_beams=3,
                     do_sample=False,
