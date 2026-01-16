@@ -8,10 +8,10 @@ Florence-2를 백본 네트워크로 사용한 시맨틱 통신 연구 프로젝
 SemCom_FL2/
 ├── transmitter/          # 송신기 모듈
 │   ├── __init__.py
-│   └── transmitter.py   # Vision tower까지 처리 (Method 2)
+│   └── transmitter.py   # Vision tower까지 처리 (두 가지 mode 지원)
 ├── receiver/            # 수신기 모듈
 │   ├── __init__.py
-│   └── receiver.py      # Vision tower 이후 처리 (pos_embed, temporal_embed, pooling, projection, norm, language_model)
+│   └── receiver.py      # Vision tower 이후 처리 (두 가지 mode 지원)
 ├── channel/             # 채널 모델
 │   ├── __init__.py
 │   └── channel.py       # Noiseless, AWGN, Rayleigh 채널
@@ -20,36 +20,50 @@ SemCom_FL2/
 │   └── florence2_model.py  # Florence-2 모델 래퍼
 ├── shared/              # 공유 모듈
 │   ├── __init__.py
-│   ├── task_embedding.py
 │   └── csi.py           # Channel State Information
 ├── utils/               # 유틸리티 함수
 │   ├── __init__.py
 │   └── image_utils.py
+├── data/                # 데이터 로더
+│   ├── __init__.py
+│   └── coco_dataset.py  # COCO Caption Dataset
 ├── tests/                # 테스트 스크립트
 │   ├── __init__.py
 │   ├── test_semcom.py   # 전체 파이프라인 테스트
 │   ├── test_component_separation.py  # 컴포넌트 분리 검증
 │   └── test_dummy_image_embedding.py  # Text embedding 일관성 테스트
 ├── docs/                # 문서
-│   ├── COMPRESSION_POINT_COMPARISON.md
-│   ├── tokenization_analysis.md
-│   ├── tokenization_difference_explanation.md
-│   ├── tokenization_difference_summary.md
-│   ├── dummy_image_text_embedding_result.md
-│   ├── TEXT_EMBEDDING_SHARING_UPDATE.md
-│   └── tx_rx_separation_analysis.md
-├── main.py              # 메인 스크립트
+│   ├── README.md        # 문서 인덱스
+│   ├── README_TRAINING.md  # Training 가이드
+│   ├── TRAINING_ARCHITECTURE.md  # Training 아키텍처
+│   ├── PROJECT_STRUCTURE.md  # 프로젝트 구조 상세
+│   ├── assets/          # 이미지 및 기타 리소스
+│   └── *.md             # 기타 상세 문서들
+├── scripts/             # 유틸리티 스크립트
+│   └── download_coco.sh # COCO dataset 다운로드 스크립트
+├── main.py              # 메인 스크립트 (inference)
+├── train.py             # Training 스크립트
 ├── requirements.txt     # 의존성 패키지
 └── README.md           # 이 파일
 ```
 
 ## 시스템 개요
 
-### 아키텍처: Method 2 (Compression after Vision Tower)
+### 아키텍처: 두 가지 Mode 지원
 
-**압축 지점**: Vision Tower 출력 이후 (1024차원 특징)
+**Mode 1 (vision_tower)**: 
+- Transmitter: Vision Tower까지 처리 (1024차원 출력)
+- Receiver: image_pos_embed → temporal_embed → pooling → projection → norm
 
-이 방법의 장점:
+**Mode 2 (image_proj_norm)**:
+- Transmitter: image_proj_norm까지 처리 (768차원 출력)
+- Receiver: 바로 merge 및 language_model
+
+**압축 지점** (향후 추가 예정):
+- Mode 1: Vision Tower 출력 이후 (1024차원)
+- Mode 2: Image Projection Norm 출력 이후 (768차원)
+
+**장점**:
 - 더 나은 압축 품질 (1024차원 특징)
 - 알고리즘 유연성 (다양한 압축 기법 적용 가능)
 - 강건성 (공간 정보 보존)
@@ -125,10 +139,15 @@ pip install -r requirements.txt
 
 ## 사용법
 
-### 기본 사용
+### 기본 사용 (Inference)
 
 ```bash
-python main.py
+# 기본 실행 (test image URL 사용, noiseless 채널)
+python main.py --task_prompt "<CAPTION>" --channel_type noiseless
+
+# Mode 선택
+python main.py --mode vision_tower --task_prompt "<CAPTION>"
+python main.py --mode image_proj_norm --task_prompt "<CAPTION>"
 ```
 
 ### 옵션 포함
@@ -136,35 +155,23 @@ python main.py
 ```bash
 # AWGN 채널, SNR 20dB
 python main.py \
-    --channel-type awgn \
-    --snr-db 20.0
+    --channel_type awgn \
+    --snr_db 20.0 \
+    --task_prompt "<CAPTION>"
 ```
 
 ### 이미지 입력
 
 ```bash
-python main.py --image-path /path/to/image.jpg
+python main.py --image_path /path/to/image.jpg --task_prompt "<CAPTION>"
 ```
 
 ### Task prompt 지정
 
 ```bash
-python main.py --task-prompt "<CAPTION>"
-```
-
-### 모든 옵션
-
-```bash
-python main.py \
-    --model-name microsoft/Florence-2-base \
-    --model-size base \
-    --task-prompt "<CAPTION>" \
-    --task-embedding-dim 768 \
-    --channel-type rayleigh \
-    --snr-db 15.0 \
-    --image-path /path/to/image.jpg \
-    --image-size 224 \
-    --batch-size 1
+python main.py --task_prompt "<CAPTION>"
+python main.py --task_prompt "<DETAILED_CAPTION>"
+python main.py --task_prompt "<OD>"
 ```
 
 ## 테스트
@@ -187,15 +194,17 @@ python tests/test_component_separation.py
 python tests/test_dummy_image_embedding.py
 ```
 
-## 주요 인자
+## 주요 인자 (main.py)
 
-- `--task-prompt`: Task prompt 문자열 (예: `<CAPTION>`, `<DETAILED_CAPTION>`, `<OD>`)
-- `--channel-type`: 채널 타입 (noiseless, awgn, rayleigh)
-- `--snr-db`: Effective SNR (dB)
-- `--task-embedding-dim`: Task embedding 차원 (기본값: 768)
-- `--image-path`: 입력 이미지 경로
-- `--image-size`: 이미지 크기 (H=W, 기본값: 224)
-- `--batch-size`: 배치 크기 (기본값: 1)
+- `--mode`: Processing mode (`vision_tower` 또는 `image_proj_norm`)
+- `--task_prompt`: Task prompt 문자열 (예: `<CAPTION>`, `<DETAILED_CAPTION>`, `<OD>`)
+- `--channel_type`: 채널 타입 (noiseless, awgn, rayleigh)
+- `--snr_db`: Effective SNR (dB)
+- `--image_path`: 입력 이미지 경로 (없으면 test image URL 사용)
+- `--image_size`: 이미지 크기 (H=W, 기본값: 224)
+- `--batch_size`: 배치 크기 (기본값: 1)
+
+자세한 training 인자는 `docs/README_TRAINING.md`를 참조하세요.
 
 ## 모듈 설명
 
@@ -214,12 +223,30 @@ python tests/test_dummy_image_embedding.py
 - Text embeddings (shared from top level)와 병합
 - Language model을 통한 최종 텍스트 생성
 
+## Training
+
+COCO dataset을 사용한 training이 지원됩니다.
+
+### 빠른 시작
+```bash
+# COCO dataset 다운로드 (선택사항)
+bash scripts/download_coco.sh
+
+# Training 실행
+python train.py --data_root /data4/hongsik/data/COCO --batch_size 4 --num_epochs 10
+```
+
+자세한 내용은 `docs/README_TRAINING.md`를 참조하세요.
+
 ## 문서
 
 자세한 내용은 `docs/` 폴더를 참조하세요:
+- `README_TRAINING.md`: Training 가이드
+- `TRAINING_ARCHITECTURE.md`: Training 아키텍처 (Frozen vs Trainable)
 - `COMPRESSION_POINT_COMPARISON.md`: 압축 지점 비교 분석
 - `tokenization_difference_summary.md`: Tokenization 차이 요약
 - `TEXT_EMBEDDING_SHARING_UPDATE.md`: Text embedding 공유 구조 설명
+- `PROJECT_STRUCTURE.md`: 프로젝트 구조 상세 설명
 - 기타 상세 문서들
 
 ## 참고사항

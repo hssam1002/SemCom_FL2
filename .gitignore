@@ -2,13 +2,43 @@
 *.pth
 *.pt
 *.h5
+*.ckpt
+checkpoints/
+checkpoint_*.pt
 
 # 가상환경 및 캐시
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
 venv/
 .venv/
-.DS_Store
+env/
+.env
 
-# 에디터 관련 설정 (추가 추천)
+# 에디터 관련 설정
 .cursor/
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS 관련
+.DS_Store
+Thumbs.db
+
+# 데이터 파일 (큰 파일)
+*.zip
+*.tar.gz
+*.h5
+*.hdf5
+
+# 로그 파일
+*.log
+logs/
+
+# 임시 파일
+*.tmp
+*.temp

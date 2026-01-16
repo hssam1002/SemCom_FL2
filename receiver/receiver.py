@@ -24,37 +24,57 @@ class Receiver(nn.Module):
     """
     Receiver for semantic communication.
     
-    Method 2: Compression after Vision Tower
-    Processes received vision_tower features (from Transmitter) through remaining steps:
-    1. Decompression (if compression was applied)
-    2. image_pos_embed
-    3. visual_temporal_embed
-    4. image_feature_source_pooling
-    5. image_projection
-    6. image_proj_norm
-    7. language_model + decoding
+    Two modes supported:
+    - Mode 1 (vision_tower): Receives vision_tower features, processes through:
+      1. decompression_module (trainable, future)
+      2. image_pos_embed (frozen)
+      3. visual_temporal_embed (frozen)
+      4. image_feature_source_pooling (frozen)
+      5. image_projection (frozen)
+      6. image_proj_norm (frozen)
+      7. merge with text_embeddings (frozen)
+      8. language_model + decoding (frozen)
     
-    Flow: received_vision_features -> processing -> merge with task_embedding -> language_model.generate
+    - Mode 2 (image_proj_norm): Receives already processed features (after image_proj_norm):
+      1. decompression_module (trainable, future)
+      2. merge with text_embeddings (frozen)
+      3. language_model + decoding (frozen)
+    
+    Note: All Florence-2 modules are FROZEN.
+          Only future decompression module will be trainable.
+    
+    Future structure:
+    - received_signal → decompression_module (trainable) → image_pos_embed (frozen) → ...
     
     Args:
-        florence2_model: Florence-2 model instance
+        florence2_model: Florence-2 model instance (frozen)
+        mode: Processing mode ('vision_tower' or 'image_proj_norm'), must match transmitter mode
         use_pooled_features: Whether transmitter used pooled features (deprecated, kept for compatibility)
     """
     
     def __init__(
         self,
         florence2_model: Florence2Model,
+        mode: str = 'vision_tower',
         use_pooled_features: bool = False
     ):
         super().__init__()
         
         self.florence2_model = florence2_model
+        self.mode = mode
         self.use_pooled_features = use_pooled_features
         
-        # Transmitter outputs vision_tower features (1024 dimension for base model)
-        # After processing, will be 768 dimension (image_proj_norm output)
-        self.vision_dim = florence2_model.get_vision_dim()  # 1024 (vision_tower output)
-        self.projected_dim = 768  # After image_projection and image_proj_norm
+        # Set dimensions based on mode
+        if mode == 'vision_tower':
+            # Mode 1: Receives vision_tower features (1024-dim), processes to 768-dim
+            self.vision_dim = florence2_model.get_vision_dim()  # 1024 (vision_tower output)
+            self.projected_dim = 768  # After image_projection and image_proj_norm
+        elif mode == 'image_proj_norm':
+            # Mode 2: Receives already processed features (768-dim)
+            self.vision_dim = 768
+            self.projected_dim = 768
+        else:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'vision_tower' or 'image_proj_norm'")
 
         # Task embedding dimension (768 for Florence-2-base text embeddings)
         self.task_embedding_dim = 768
@@ -63,12 +83,15 @@ class Receiver(nn.Module):
         self.task_projection = None
         
         # Access Florence-2's transformer encoder and decoder (optional, for fallback)
+        # Note: Florence-2 language_model contains both encoder and decoder in language_model.model
+        # We use language_model.generate() directly, but encoder/decoder are available if needed
         self.transformer_encoder = florence2_model.get_transformer_encoder()
         self.transformer_decoder = florence2_model.get_transformer_decoder()
         
-        if self.transformer_encoder is None or self.transformer_decoder is None:
-            print("Warning: Florence-2 transformer encoder/decoder not found.")
-            print("Using placeholder components.")
+        # Note: We use language_model.generate() directly, not separate encoder/decoder
+        # These are kept for potential future use or fallback scenarios
+        
+        print(f"Receiver initialized with mode: {mode}")
     
     def forward(
         self,
@@ -76,9 +99,9 @@ class Receiver(nn.Module):
         task_prompts: Union[List[str], torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Process received vision_tower features through remaining Florence-2 pipeline.
+        Process received vision features through remaining Florence-2 pipeline.
         
-        Method 2 Flow:
+        Mode 1 (vision_tower) Flow:
         1. received_vision_embedding (vision_tower output from Tx) - shape: (batch, seq_len, 1024)
         2. image_pos_embed (if applicable)
         3. visual_temporal_embed (if applicable)
@@ -88,9 +111,15 @@ class Receiver(nn.Module):
         7. Merge with task_embeddings
         8. -> Ready for language_model
         
+        Mode 2 (image_proj_norm) Flow:
+        1. received_vision_embedding (already processed from Tx) - shape: (batch, seq_len, 768)
+        2. Merge with task_embeddings
+        3. -> Ready for language_model
+        
         Args:
-            received_vision_embedding: Received vision_tower features from channel
-                Shape: (batch_size, seq_len, 1024) for base model
+            received_vision_embedding: Received vision features from channel
+                Mode 1: (batch_size, seq_len, 1024) - vision_tower output
+                Mode 2: (batch_size, seq_len, 768) - image_proj_norm output
             task_prompts: Task prompts (list of strings) or text_embeddings (tensor)
                 Recommended: text_embeddings generated at top level (main/test_semcom.py)
                 using processor with all-zero dummy image, and shared with Tx/Rx
@@ -107,93 +136,101 @@ class Receiver(nn.Module):
         batch_size = received_vision_embedding.shape[0]
         T = 1  # Single frame
         
-        # Start with vision_tower features from Transmitter
-        # Ensure we have the features (not tuple) - match test_component_separation.py
+        # Start with vision features from Transmitter
+        # Ensure we have the features (not tuple)
         if isinstance(received_vision_embedding, tuple):
-            vision_features = received_vision_embedding[0]  # (batch, seq_len, 1024)
+            vision_features = received_vision_embedding[0]
         else:
-            vision_features = received_vision_embedding  # (batch, seq_len, 1024)
+            vision_features = received_vision_embedding
         
-        # ============================================================
-        # Step 1: image_pos_embed (if applicable)
-        # ============================================================
-        # EXACT COPY from test_component_separation.py lines 283-307
-        if hasattr(model, 'image_pos_embed') and model.image_pos_embed is not None:
-            # 특징을 (batch*T, seq_len, hidden_dim) 형태로 재구성
-            x = vision_features.view(batch_size * T, -1, vision_features.shape[-1])
-            num_tokens = x.shape[-2]  # 패치 개수
-            h = w = int(num_tokens ** 0.5)  # 정사각형 가정 (h = w)
+        # Mode 2: Already processed up to image_proj_norm, skip to merge
+        if self.mode == 'image_proj_norm':
+            # Vision features are already (batch, seq_len, 768) - ready for merge
+            pass
+        # Mode 1: Process from vision_tower to image_proj_norm
+        elif self.mode == 'vision_tower':
+            # ============================================================
+            # Step 1: image_pos_embed (if applicable)
+            # ============================================================
+            # EXACT COPY from test_component_separation.py lines 283-307
+            if hasattr(model, 'image_pos_embed') and model.image_pos_embed is not None:
+                # 특징을 (batch*T, seq_len, hidden_dim) 형태로 재구성
+                x = vision_features.view(batch_size * T, -1, vision_features.shape[-1])
+                num_tokens = x.shape[-2]  # 패치 개수
+                h = w = int(num_tokens ** 0.5)  # 정사각형 가정 (h = w)
+                
+                if h * w == num_tokens:
+                    # 완전한 정사각형인 경우에만 위치 임베딩 적용
+                    # (batch*T, h, w, hidden_dim) 형태로 재구성
+                    x = x.view(batch_size * T, h, w, x.shape[-1])
+                    # 위치 임베딩 계산 및 추가
+                    pos_embed = model.image_pos_embed(x)  # 각 위치에 대한 임베딩 생성
+                    x = x + pos_embed  # 원본 특징에 위치 정보 추가
+                    # 다시 (batch, T*h*w, hidden_dim) 형태로 변환
+                    x = x.view(batch_size, T * h * w, x.shape[-1])
+                    vision_features = x
+                # else: 완전한 정사각형이 아니면 image_pos_embed 건너뜀 (vision_features 그대로)
             
-            if h * w == num_tokens:
-                # 완전한 정사각형인 경우에만 위치 임베딩 적용
-                # (batch*T, h, w, hidden_dim) 형태로 재구성
-                x = x.view(batch_size * T, h, w, x.shape[-1])
-                # 위치 임베딩 계산 및 추가
-                pos_embed = model.image_pos_embed(x)  # 각 위치에 대한 임베딩 생성
-                x = x + pos_embed  # 원본 특징에 위치 정보 추가
-                # 다시 (batch, T*h*w, hidden_dim) 형태로 변환
-                x = x.view(batch_size, T * h * w, x.shape[-1])
-                vision_features = x
-            # else: 완전한 정사각형이 아니면 image_pos_embed 건너뜀 (vision_features 그대로)
-        
-        # ============================================================
-        # Step 2: visual_temporal_embed (if applicable)
-        # ============================================================
-        # EXACT COPY from test_component_separation.py lines 316-329
-        if hasattr(model, 'visual_temporal_embed') and model.visual_temporal_embed is not None:
-            # (batch, T, seq_len, hidden_dim) 형태로 재구성
+            # ============================================================
+            # Step 2: visual_temporal_embed (if applicable)
+            # ============================================================
+            # EXACT COPY from test_component_separation.py lines 316-329
+            if hasattr(model, 'visual_temporal_embed') and model.visual_temporal_embed is not None:
+                # (batch, T, seq_len, hidden_dim) 형태로 재구성
+                x_reshaped = vision_features.view(batch_size, T, -1, vision_features.shape[-1])
+                # 첫 번째 토큰에만 시간 임베딩 적용
+                first_token = x_reshaped[:, :, 0]
+                visual_temporal_emb = model.visual_temporal_embed(first_token)
+                # 모든 토큰에 시간 정보 브로드캐스트하여 추가
+                # EXACT COPY: test_component_separation.py line 326
+                x_reshaped = x_reshaped + visual_temporal_emb.view(1, T, 1, vision_features.shape[-1])
+                # 다시 (batch, T*seq_len, hidden_dim) 형태로 변환
+                # EXACT COPY: test_component_separation.py line 328
+                vision_features = x_reshaped.view(batch_size, T * x_reshaped.shape[2], vision_features.shape[-1])
+            
+            # ============================================================
+            # Step 3: image_feature_source_pooling
+            # ============================================================
+            # EXACT COPY from test_component_separation.py lines 354-408
             x_reshaped = vision_features.view(batch_size, T, -1, vision_features.shape[-1])
-            # 첫 번째 토큰에만 시간 임베딩 적용
-            first_token = x_reshaped[:, :, 0]
-            visual_temporal_emb = model.visual_temporal_embed(first_token)
-            # 모든 토큰에 시간 정보 브로드캐스트하여 추가
-            # EXACT COPY: test_component_separation.py line 326
-            x_reshaped = x_reshaped + visual_temporal_emb.view(1, T, 1, vision_features.shape[-1])
-            # 다시 (batch, T*seq_len, hidden_dim) 형태로 변환
-            # EXACT COPY: test_component_separation.py line 328
-            vision_features = x_reshaped.view(batch_size, T * x_reshaped.shape[2], vision_features.shape[-1])
-        
-        # ============================================================
-        # Step 3: image_feature_source_pooling
-        # ============================================================
-        # EXACT COPY from test_component_separation.py lines 354-408
-        x_reshaped = vision_features.view(batch_size, T, -1, vision_features.shape[-1])
-        
-        # 기본값: last_frame 사용 (하지만 model에서 가져옴)
-        if hasattr(model, 'image_feature_source'):
-            image_feature_source = model.image_feature_source
+            
+            # 기본값: last_frame 사용 (하지만 model에서 가져옴)
+            if hasattr(model, 'image_feature_source'):
+                image_feature_source = model.image_feature_source
+            else:
+                image_feature_source = ['last_frame']
+            
+            # 각 집계 방식으로 특징 계산
+            # 주의: 각 pooling 방식의 출력 차원이 다릅니다!
+            x_feat_dict = {
+                'spatial_avg_pool': x_reshaped.mean(dim=2),  # 공간 평균: (batch, T, hidden_dim)
+                'temporal_avg_pool': x_reshaped.mean(dim=1),  # 시간 평균: (batch, seq_len, hidden_dim)
+                'last_frame': x_reshaped[:, -1]                # 마지막 프레임: (batch, seq_len, hidden_dim)
+            }
+            
+            # 설정된 집계 방식들을 결합
+            new_x = []
+            for _image_feature_source in image_feature_source:
+                if _image_feature_source not in x_feat_dict:
+                    raise ValueError(f'invalid image feature source: {_image_feature_source}')
+                new_x.append(x_feat_dict[_image_feature_source])
+            
+            # 여러 집계 결과를 시퀀스 차원으로 연결
+            vision_features = torch.cat(new_x, dim=1)
+            
+            # ============================================================
+            # Step 4: image_projection (1024 -> 768)
+            # ============================================================
+            vision_features = vision_features @ model.image_projection
+            
+            # ============================================================
+            # Step 5: image_proj_norm
+            # ============================================================
+            vision_features = model.image_proj_norm(vision_features)
+            
+            # Now vision_features is (batch, seq_len, 768) - ready for language_model
         else:
-            image_feature_source = ['last_frame']
-        
-        # 각 집계 방식으로 특징 계산
-        # 주의: 각 pooling 방식의 출력 차원이 다릅니다!
-        x_feat_dict = {
-            'spatial_avg_pool': x_reshaped.mean(dim=2),  # 공간 평균: (batch, T, hidden_dim)
-            'temporal_avg_pool': x_reshaped.mean(dim=1),  # 시간 평균: (batch, seq_len, hidden_dim)
-            'last_frame': x_reshaped[:, -1]                # 마지막 프레임: (batch, seq_len, hidden_dim)
-        }
-        
-        # 설정된 집계 방식들을 결합
-        new_x = []
-        for _image_feature_source in image_feature_source:
-            if _image_feature_source not in x_feat_dict:
-                raise ValueError(f'invalid image feature source: {_image_feature_source}')
-            new_x.append(x_feat_dict[_image_feature_source])
-        
-        # 여러 집계 결과를 시퀀스 차원으로 연결
-        vision_features = torch.cat(new_x, dim=1)
-        
-        # ============================================================
-        # Step 4: image_projection (1024 -> 768)
-        # ============================================================
-        vision_features = vision_features @ model.image_projection
-        
-        # ============================================================
-        # Step 5: image_proj_norm
-        # ============================================================
-        vision_features = model.image_proj_norm(vision_features)
-        
-        # Now vision_features is (batch, seq_len, 768) - ready for language_model
+            raise ValueError(f"Invalid mode: {self.mode}")
         
         # ============================================================
         # Step 6: Merge vision features with task embeddings

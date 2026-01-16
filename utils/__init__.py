@@ -6,6 +6,7 @@ This module provides utility functions for image processing and other common tas
 Main Functions:
 - load_image: Load image from file path with optional resizing
 - preprocess_image: Preprocess image for Florence-2 model (normalization, tensor conversion)
+      Note: Currently not used (Florence-2 processor handles preprocessing)
 """
 
 from .image_utils import load_image, preprocess_image

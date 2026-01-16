@@ -105,13 +105,21 @@ class Florence2Model(nn.Module):
         self.vision_encoder.eval()  # Set to eval mode for inference
         
         # Extract transformer encoder and decoder (for receiver)
-        # Florence-2 structure: language_model contains the text processing components
+        # Florence-2 structure: language_model.model contains encoder and decoder
+        # Note: language_model itself is the wrapper, encoder/decoder are in language_model.model
         if hasattr(self.model, 'language_model'):
-            # language_model typically contains both encoder and decoder
-            self.text_encoder = getattr(self.model.language_model, 'encoder', None)
-            self.text_decoder = getattr(self.model.language_model, 'decoder', None)
+            # Check if language_model has a 'model' attribute (which contains encoder/decoder)
+            if hasattr(self.model.language_model, 'model'):
+                # Florence-2 structure: language_model.model.encoder and language_model.model.decoder
+                self.text_encoder = getattr(self.model.language_model.model, 'encoder', None)
+                self.text_decoder = getattr(self.model.language_model.model, 'decoder', None)
+            else:
+                # Fallback: try direct access
+                self.text_encoder = getattr(self.model.language_model, 'encoder', None)
+                self.text_decoder = getattr(self.model.language_model, 'decoder', None)
+            
+            # If still no decoder found, use language_model itself (for generate method)
             if self.text_decoder is None:
-                # If no separate decoder, language_model itself might be the decoder
                 self.text_decoder = self.model.language_model
         elif hasattr(self.model, 'florence'):
             # Fallback to florence structure if it exists

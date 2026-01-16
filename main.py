@@ -12,9 +12,7 @@ from models.florence2_model import Florence2Model, get_vision_encoder_output_dim
 from transmitter.transmitter import Transmitter
 from channel.channel import Channel, create_channel
 from receiver.receiver import Receiver
-from shared.task_embedding import TaskEmbedding
-from shared.csi import CSI
-from utils.image_utils import load_image, preprocess_image
+from utils.image_utils import load_image
 
 
 def main(args):
@@ -39,13 +37,7 @@ def main(args):
         device=device
     )
     
-    # Initialize shared components
-    print("\n=== Initializing Shared Components ===")
-    csi = CSI(
-        effective_snr_db=args.snr_db,
-        channel_type=args.channel_type
-    )
-    print(f"CSI: {csi}")
+    # Note: CSI is created by Channel, not needed here separately
     
     # Create task prompts
     if args.task_prompt:
@@ -82,10 +74,12 @@ def main(args):
     print("\n=== Initializing Transmitter ===")
     transmitter = Transmitter(
         florence2_model=florence2_model,
+        mode=args.mode,
         task_embedding_dim=args.task_embedding_dim,
         include_linear_embedding=args.include_linear_embedding,
         use_pooled_features=args.use_pooled_features
     ).to(device)
+    print(f"Transmitter mode: {args.mode}")
     print(f"Transmitter output dimension: {transmitter.get_output_dim()}")
     print(f"Transmitter output shape: {transmitter.get_output_shape(args.batch_size)}")
     
@@ -101,6 +95,7 @@ def main(args):
     print("\n=== Initializing Receiver ===")
     receiver = Receiver(
         florence2_model=florence2_model,
+        mode=args.mode,
         use_pooled_features=args.use_pooled_features
     ).to(device)
     
@@ -273,28 +268,37 @@ if __name__ == "__main__":
     
     # Model arguments
     parser.add_argument(
-        '--model-name',
+        '--model_name',
         type=str,
         default='microsoft/Florence-2-base',
         help='Florence-2 model name from HuggingFace'
     )
     parser.add_argument(
-        '--model-size',
+        '--model_size',
         type=str,
         default='base',
         choices=['base', 'large'],
         help='Model size (for dimension lookup)'
     )
     
+    # Mode arguments
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default='vision_tower',
+        choices=['vision_tower', 'image_proj_norm'],
+        help='Processing mode: vision_tower (Mode 1) or image_proj_norm (Mode 2)'
+    )
+    
     # Task prompt arguments
     parser.add_argument(
-        '--task-prompt',
+        '--task_prompt',
         type=str,
         default=None,
-        help='Task prompt string (e.g., "What does the image describe?")'
+        help='Task prompt string (e.g., "<CAPTION>")'
     )
     parser.add_argument(
-        '--task-embedding-dim',
+        '--task_embedding_dim',
         type=int,
         default=768,
         help='Dimension of task embedding (for linear embedding option, if used)'
@@ -302,26 +306,26 @@ if __name__ == "__main__":
     
     # Transmitter arguments
     parser.add_argument(
-        '--include-linear-embedding',
+        '--include_linear_embedding',
         action='store_true',
         help='Include linear embedding to match task embedding dimension'
     )
     parser.add_argument(
-        '--use-pooled-features',
+        '--use_pooled_features',
         action='store_true',
         help='Use pooled features (CLS token) instead of full sequence'
     )
     
     # Channel arguments
     parser.add_argument(
-        '--channel-type',
+        '--channel_type',
         type=str,
         default='awgn',
         choices=['noiseless', 'awgn', 'rayleigh'],
         help='Channel type'
     )
     parser.add_argument(
-        '--snr-db',
+        '--snr_db',
         type=float,
         default=20.0,
         help='Effective SNR in dB'
@@ -329,19 +333,19 @@ if __name__ == "__main__":
     
     # Input arguments
     parser.add_argument(
-        '--image-path',
+        '--image_path',
         type=str,
         default=None,
         help='Path to input image (if None, uses dummy image)'
     )
     parser.add_argument(
-        '--image-size',
+        '--image_size',
         type=int,
         default=224,
         help='Image size (H=W)'
     )
     parser.add_argument(
-        '--batch-size',
+        '--batch_size',
         type=int,
         default=1,
         help='Batch size'

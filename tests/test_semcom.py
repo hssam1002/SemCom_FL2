@@ -26,7 +26,6 @@ from models.florence2_model import Florence2Model, get_vision_encoder_output_dim
 from transmitter.transmitter import Transmitter
 from channel.channel import Channel, create_channel
 from receiver.receiver import Receiver
-from utils.image_utils import load_image, preprocess_image
 
 
 def test_semantic_communication():
