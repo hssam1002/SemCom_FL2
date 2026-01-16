@@ -7,6 +7,7 @@
 ### 빠른 시작
 - **README_TRAINING.md**: Training 가이드 (COCO dataset, training 실행 방법)
 - **PROJECT_STRUCTURE.md**: 프로젝트 구조 상세 설명
+- **TEST_GUIDE.md**: 테스트 스크립트 사용 가이드 ⭐
 
 ### 아키텍처 및 설계
 - **TRAINING_ARCHITECTURE.md**: Training 아키텍처 (Frozen vs Trainable components)
@@ -28,11 +29,12 @@
 
 ## 문서 읽는 순서 (권장)
 
-1. **README_TRAINING.md**: Training 시작하기
-2. **TRAINING_ARCHITECTURE.md**: Training 아키텍처 이해 (Frozen components)
-3. **COMPRESSION_POINT_COMPARISON.md**: 압축 지점 선택 이유 이해
-4. **tokenization_difference_summary.md**: Tokenization 차이 핵심 이해
-5. **TEXT_EMBEDDING_SHARING_UPDATE.md**: Text embedding 공유 구조 이해
+1. **TEST_GUIDE.md**: 테스트 스크립트 사용법 이해
+2. **README_TRAINING.md**: Training 시작하기
+3. **TRAINING_ARCHITECTURE.md**: Training 아키텍처 이해 (Frozen components)
+4. **COMPRESSION_POINT_COMPARISON.md**: 압축 지점 선택 이유 이해
+5. **tokenization_difference_summary.md**: Tokenization 차이 핵심 이해
+6. **TEXT_EMBEDDING_SHARING_UPDATE.md**: Text embedding 공유 구조 이해
 
 ## 추가 정보
 

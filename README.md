@@ -179,8 +179,23 @@ python main.py --task_prompt "<OD>"
 ### 전체 파이프라인 테스트
 
 ```bash
+# 기본 실행 (noiseless 채널)
 python tests/test_semcom.py
+
+# AWGN 채널, SNR 10dB
+python tests/test_semcom.py --channel_type awgn --snr_db 10.0
+
+# Rayleigh 채널, SNR 15dB
+python tests/test_semcom.py --channel_type rayleigh --snr_db 15.0
+
+# Mode 변경 (image_proj_norm)
+python tests/test_semcom.py --mode image_proj_norm --channel_type awgn --snr_db 10.0
 ```
+
+**test_semcom.py 인자:**
+- `--channel_type`: 채널 타입 (`noiseless`, `awgn`, `rayleigh`, 기본값: `noiseless`)
+- `--snr_db`: Signal-to-noise ratio in dB (기본값: `20.0`)
+- `--mode`: Processing mode (`vision_tower` 또는 `image_proj_norm`, 기본값: `vision_tower`)
 
 ### 컴포넌트 분리 검증
 
@@ -241,6 +256,7 @@ python train.py --data_root /data4/hongsik/data/COCO --batch_size 4 --num_epochs
 ## 문서
 
 자세한 내용은 `docs/` 폴더를 참조하세요:
+- `TEST_GUIDE.md`: 테스트 스크립트 사용 가이드 (test_semcom.py 인자 포함)
 - `README_TRAINING.md`: Training 가이드
 - `TRAINING_ARCHITECTURE.md`: Training 아키텍처 (Frozen vs Trainable)
 - `COMPRESSION_POINT_COMPARISON.md`: 압축 지점 비교 분석

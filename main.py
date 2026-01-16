@@ -5,6 +5,7 @@ Main script for semantic communication system using Florence-2.
 import torch
 import argparse
 import requests
+import math
 from pathlib import Path
 from PIL import Image
 
@@ -255,7 +256,7 @@ def main(args):
     print(f"Received signal power: {rx_power:.6f}")
     if args.channel_type != 'noiseless':
         print(f"Noise power: {noise_power:.6f}")
-        actual_snr = 10 * torch.log10(tx_power / noise_power) if noise_power > 0 else float('inf')
+        actual_snr = 10 * math.log10(tx_power / noise_power) if noise_power > 0 else float('inf')
         print(f"Actual SNR: {actual_snr:.2f} dB")
     
     print("\n=== Simulation Complete ===")

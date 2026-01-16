@@ -132,8 +132,17 @@ python main.py --task-prompt "<CAPTION>" --channel-type awgn --snr-db 20.0
 
 ### 테스트 실행
 ```bash
-# 전체 파이프라인 테스트
+# 전체 파이프라인 테스트 (기본: noiseless 채널)
 python tests/test_semcom.py
+
+# AWGN 채널, SNR 10dB
+python tests/test_semcom.py --channel_type awgn --snr_db 10.0
+
+# Rayleigh 채널, SNR 15dB
+python tests/test_semcom.py --channel_type rayleigh --snr_db 15.0
+
+# Mode 변경 (image_proj_norm)
+python tests/test_semcom.py --mode image_proj_norm --channel_type awgn --snr_db 10.0
 
 # 컴포넌트 분리 검증
 python tests/test_component_separation.py
@@ -141,6 +150,11 @@ python tests/test_component_separation.py
 # Text embedding 일관성 테스트
 python tests/test_dummy_image_embedding.py
 ```
+
+**test_semcom.py 인자:**
+- `--channel_type`: 채널 타입 (`noiseless`, `awgn`, `rayleigh`, 기본값: `noiseless`)
+- `--snr_db`: Signal-to-noise ratio in dB (기본값: `20.0`)
+- `--mode`: Processing mode (`vision_tower` 또는 `image_proj_norm`, 기본값: `vision_tower`)
 
 ## 참고
 

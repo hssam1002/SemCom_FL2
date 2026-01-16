@@ -28,8 +28,19 @@ from channel.channel import Channel, create_channel
 from receiver.receiver import Receiver
 
 
-def test_semantic_communication():
-    """Test the full semantic communication pipeline."""
+def test_semantic_communication(
+    channel_type: str = 'noiseless',
+    snr_db: float = 20.0,
+    mode: str = 'vision_tower'
+):
+    """
+    Test the full semantic communication pipeline.
+    
+    Args:
+        channel_type: Channel type ('noiseless', 'awgn', 'rayleigh')
+        snr_db: Signal-to-noise ratio in dB
+        mode: Processing mode ('vision_tower' or 'image_proj_norm')
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     print("=" * 70)
@@ -62,9 +73,11 @@ def test_semantic_communication():
     
     # Initialize Transmitter
     print("\n[3/5] Initializing Transmitter...")
+    print(f"  Mode: {mode}")
     try:
         transmitter = Transmitter(
             florence2_model=florence2_model,
+            mode=mode,
             task_embedding_dim=768,
             include_linear_embedding=False,
             use_pooled_features=False
@@ -80,10 +93,11 @@ def test_semantic_communication():
     print("\n[4/5] Initializing Channel...")
     try:
         channel = create_channel(
-            channel_type='noiseless',
-            effective_snr_db=20.0
+            channel_type=channel_type,
+            effective_snr_db=snr_db
         )
-        print("✓ Channel initialized (Noiseless)")
+        channel_name = channel_type.upper() if channel_type != 'noiseless' else 'Noiseless'
+        print(f"✓ Channel initialized ({channel_name}, SNR: {snr_db} dB)")
     except Exception as e:
         print(f"✗ Failed to initialize channel: {e}")
         import traceback
@@ -95,6 +109,7 @@ def test_semantic_communication():
     try:
         receiver = Receiver(
             florence2_model=florence2_model,
+            mode=mode,  # Use same mode as transmitter
             use_pooled_features=False
         ).to(device)
         print("✓ Receiver initialized")
@@ -123,12 +138,23 @@ def test_semantic_communication():
         return
     
     # Channel: Vision Embedding -> Received Signal
-    print("\n[Step 3] Channel: Transmitting through noiseless channel...")
+    print(f"\n[Step 3] Channel: Transmitting through {channel_type} channel (SNR: {snr_db} dB)...")
     try:
         with torch.no_grad():
             received_signal = channel(tx_output)
         print(f"✓ Received signal shape: {received_signal.shape}")
-        print(f"  Noiseless channel: signal passed through unchanged")
+        
+        # Calculate signal power metrics
+        tx_power = torch.mean(tx_output ** 2).item()
+        rx_power = torch.mean(received_signal ** 2).item()
+        noise_power = rx_power - tx_power if channel_type != 'noiseless' else 0.0
+        actual_snr = 10 * math.log10(tx_power / noise_power) if noise_power > 0 else float('inf')
+        
+        print(f"  Transmitted power: {tx_power:.6f}")
+        print(f"  Received power: {rx_power:.6f}")
+        if channel_type != 'noiseless':
+            print(f"  Noise power: {noise_power:.6f}")
+            print(f"  Actual SNR: {actual_snr:.2f} dB")
     except Exception as e:
         print(f"✗ Channel transmission failed: {e}")
         import traceback
@@ -267,22 +293,41 @@ def test_semantic_communication():
         # Print comparison
         print(f"\n  [Receiver Result]")
         if receiver_result is not None:
-            print(f"    {receiver_result}")
+            for key, value in receiver_result.items():
+                print(f"    {key}: {value}")
         else:
             print(f"    (Failed to generate)")
         
         print(f"\n  [Reference Result]")
         if reference_result is not None:
-            print(f"    {reference_result}")
+            for key, value in reference_result.items():
+                print(f"    {key}: {value}")
         else:
             print(f"    (Failed to generate)")
         
         # Compare if both succeeded
+        print(f"\n  [Comparison]")
         if receiver_result is not None and reference_result is not None:
+            # Compare dictionaries
             if receiver_result == reference_result:
-                print(f"\n  ✓ Results match!")
+                print(f"  ✓ Results match! Semantic communication pipeline works correctly.")
             else:
-                print(f"\n  ⚠ Results differ")
+                print(f"  ⚠ Results differ:")
+                print(f"    Receiver: {receiver_result}")
+                print(f"    Reference: {reference_result}")
+                
+                # Show detailed differences
+                if isinstance(receiver_result, dict) and isinstance(reference_result, dict):
+                    all_keys = set(receiver_result.keys()) | set(reference_result.keys())
+                    for key in all_keys:
+                        rx_val = receiver_result.get(key)
+                        ref_val = reference_result.get(key)
+                        if rx_val != ref_val:
+                            print(f"      {key}:")
+                            print(f"        Receiver:  {rx_val}")
+                            print(f"        Reference: {ref_val}")
+        else:
+            print(f"  ⚠ Could not compare results (generation failed)")
     
     print("\n" + "=" * 70)
     print("Test Summary")
@@ -295,4 +340,22 @@ def test_semantic_communication():
 
 
 if __name__ == "__main__":
-    test_semantic_communication()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Test semantic communication pipeline')
+    parser.add_argument('--channel_type', type=str, default='noiseless',
+                        choices=['noiseless', 'awgn', 'rayleigh'],
+                        help='Channel type (default: noiseless)')
+    parser.add_argument('--snr_db', type=float, default=20.0,
+                        help='Signal-to-noise ratio in dB (default: 20.0)')
+    parser.add_argument('--mode', type=str, default='vision_tower',
+                        choices=['vision_tower', 'image_proj_norm'],
+                        help='Processing mode (default: vision_tower)')
+    
+    args = parser.parse_args()
+    
+    test_semantic_communication(
+        channel_type=args.channel_type,
+        snr_db=args.snr_db,
+        mode=args.mode
+    )
