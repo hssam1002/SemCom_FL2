@@ -1,6 +1,8 @@
 """
 COCO Multi-Task Dataset for Florence-2 training.
 Supports multiple tasks: Caption, Object Detection, Segmentation, etc.
+
+All ground truth data is pre-formatted as text strings for efficient training.
 """
 
 import os
@@ -161,17 +163,30 @@ class COCOMultiTaskDataset(Dataset):
             
             image_annotations[img_id].append(annotation_data)
         
-        # Create samples
+        # Create samples with pre-formatted text ground truth
+        # Pre-format ground truth as text for efficient training (no conversion during training)
         od_samples = []
         for img_id, anns in image_annotations.items():
-            # Format for Florence-2 OD task
-            bboxes = [ann['bbox'] for ann in anns]
-            labels = [ann['category_name'] for ann in anns]
+            # Format OD ground truth to Florence-2 text format: "[x1 y1 x2 y2] label"
+            formatted_detections = []
+            for ann in anns:
+                bbox = ann['bbox']  # [x, y, width, height] (COCO format)
+                category_name = ann['category_name']
+                
+                # Convert [x, y, w, h] to [x1, y1, x2, y2] format (corners)
+                x, y, w, h = bbox
+                x1, y1 = x, y
+                x2, y2 = x + w, y + h
+                
+                # Florence-2 format: "[<x1> <y1> <x2> <y2>] <label>"
+                formatted_detections.append(f"[{x1:.2f} {y1:.2f} {x2:.2f} {y2:.2f}] {category_name}")
             
-            od_samples.append((img_id, {'bboxes': bboxes, 'labels': labels}))
+            # Join all detections with newlines
+            gt_text = "\n".join(formatted_detections) if formatted_detections else ""
+            od_samples.append((img_id, gt_text))
         
         self.annotations['od'] = len(od_samples)
-        self.samples.extend([('od', img_id, data) for img_id, data in od_samples])
+        self.samples.extend([('od', img_id, gt_text) for img_id, gt_text in od_samples])
     
     def _load_keypoints(self):
         """Load person keypoints annotations."""
@@ -202,14 +217,33 @@ class COCOMultiTaskDataset(Dataset):
                     'bbox': ann.get('bbox', [])
                 })
         
-        keypoint_samples = [
-            (img_id, keypoints)
-            for img_id, keypoints in image_keypoints.items()
-            if len(keypoints) > 0
-        ]
+        # Create samples with pre-formatted text ground truth
+        # Pre-format ground truth as text for efficient training (no conversion during training)
+        keypoint_samples = []
+        for img_id, keypoints_list in image_keypoints.items():
+            if len(keypoints_list) == 0:
+                continue
+            
+            # Format keypoints ground truth to Florence-2 text format: "[x1 y1 x2 y2] person"
+            formatted_keypoints = []
+            for kp_data in keypoints_list:
+                if 'bbox' in kp_data and len(kp_data['bbox']) == 4:
+                    bbox = kp_data['bbox']  # [x, y, width, height] (COCO format)
+                    
+                    # Convert [x, y, w, h] to [x1, y1, x2, y2] format (corners)
+                    x, y, w, h = bbox
+                    x1, y1 = x, y
+                    x2, y2 = x + w, y + h
+                    
+                    # Florence-2 uses "<OD>" task for keypoints, format similar to OD
+                    formatted_keypoints.append(f"[{x1:.2f} {y1:.2f} {x2:.2f} {y2:.2f}] person")
+            
+            # Join all keypoints with newlines
+            gt_text = "\n".join(formatted_keypoints) if formatted_keypoints else ""
+            keypoint_samples.append((img_id, gt_text))
         
         self.annotations['keypoints'] = len(keypoint_samples)
-        self.samples.extend([('keypoints', img_id, data) for img_id, data in keypoint_samples])
+        self.samples.extend([('keypoints', img_id, gt_text) for img_id, gt_text in keypoint_samples])
     
     def __len__(self) -> int:
         return len(self.samples)
@@ -218,15 +252,19 @@ class COCOMultiTaskDataset(Dataset):
         """
         Get a sample from the dataset.
         
+        Note: All ground truth data is pre-formatted as text strings during dataset loading
+        for efficient training (no conversion needed during training).
+        
         Returns:
             Dictionary containing:
             - image: PIL Image
             - task: str (task type: 'caption', 'od', 'keypoints', etc.)
             - task_prompt: str (Florence-2 task prompt)
-            - ground_truth: dict or str (ground truth data for the task)
+            - ground_truth: str (pre-formatted text ground truth for the task)
             - image_id: int (COCO image ID)
         """
         task_type, image_id, ground_truth = self.samples[idx]
+        # ground_truth is now always a string (pre-formatted during dataset loading)
         
         # Load image
         filename = self.image_id_to_filename[image_id]

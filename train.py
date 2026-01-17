@@ -12,7 +12,7 @@ from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 from PIL import Image
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Union
 
 from models.florence2_model import Florence2Model, get_vision_encoder_output_dim
 from transmitter.transmitter import Transmitter
@@ -20,6 +20,11 @@ from channel.channel import Channel, create_channel
 from receiver.receiver import Receiver
 from data.coco_dataset import COCOCaptionDataset, download_coco_info
 from data.coco_multitask_dataset import COCOMultiTaskDataset, download_coco_multitask_info
+
+
+# Note: Ground truth formatting functions have been moved to coco_multitask_dataset.py
+# All ground truth is now pre-formatted as text during dataset loading for efficiency.
+# No conversion is needed during training - ground_truth is already a string.
 
 
 def train_one_epoch(
@@ -36,35 +41,33 @@ def train_one_epoch(
     multitask: bool = False  # If True, each sample has its own task_prompt
 ) -> Dict[str, float]:
     """
-    Train one epoch on the semantic communication pipeline.
+    Train one epoch of the semantic communication pipeline.
     
     Note: Florence-2 pre-trained model is always frozen.
-    Only Transmitter and Receiver are trained.
+    Only future compression/decompression modules will be trainable.
     
     Args:
         transmitter: Transmitter model
         receiver: Receiver model
         channel: Channel model (for adding noise during training)
-        dataloader: DataLoader for COCO dataset
-        optimizer: Optimizer
-        device: Device to run on
+        dataloader: DataLoader for training data
+        optimizer: Optimizer for trainable parameters
+        device: Device to run training on
         epoch: Current epoch number
         mode: Processing mode ('vision_tower' or 'image_proj_norm')
-        use_channel: Whether to use channel (add noise) during training
-        accumulation_steps: Gradient accumulation steps
+        use_channel: Whether to use channel noise during training
+        accumulation_steps: Number of gradient accumulation steps
+        multitask: Whether to use multi-task training
     
     Returns:
         Dictionary with training metrics (loss, etc.)
     """
-    transmitter.train()
-    receiver.train()
-    
     # Florence-2 model should always be in eval mode (frozen)
     florence2_model = transmitter.florence2_model
     florence2_model.model.eval()
     
-    total_loss = 0.0
-    num_batches = 0
+    transmitter.train()  # Transmitter may have trainable modules in future
+    receiver.train()  # Receiver may have trainable modules in future
     
     # Get processor and model for text embedding generation
     processor = florence2_model.processor
@@ -74,14 +77,14 @@ def train_one_epoch(
     # Create dummy image for text embedding generation (shared between Tx/Rx)
     dummy_image = Image.fromarray(np.zeros((768, 768, 3), dtype=np.uint8))
     
-    # Progress bar
+    total_loss = 0.0
+    num_batches = 0
+    
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
     
-    optimizer.zero_grad()
-    
     for batch_idx, batch in enumerate(pbar):
-        images = batch['image']  # List of PIL Images
-        
+        # Get batch data
+        images = batch['image']  # List of PIL Images or torch.Tensor
         batch_size = len(images)
         
         # Get task prompts from batch (each sample has its own task_prompt)
@@ -143,25 +146,14 @@ def train_one_epoch(
         # When decompression module is added, this will allow gradients to flow to it
         
         # Prepare ground truth for teacher forcing
-        # For caption task: process text directly
-        # For OD task: convert bboxes+labels to Florence-2 format
-        # Note: Currently only caption task is fully implemented for training
-        #       Other tasks (OD, etc.) will need different loss calculation
-        
-        # Get ground truth text for each sample
+        # All tasks use cross-entropy loss with text format ground truth
+        # Note: Ground truth is already pre-formatted as text in COCOMultiTaskDataset
+        #       No conversion needed during training (more efficient)
         gt_texts = []
-        for i, (task, gt) in enumerate(zip(tasks, ground_truths)):
-            if task == 'caption':
+        for gt in ground_truths:
+            # Ground truth is already a string (pre-formatted during dataset loading)
+            if isinstance(gt, str) and gt.strip():  # Only add non-empty ground truth
                 gt_texts.append(gt)
-            elif task == 'od':
-                # For OD task, we'll need to format it properly
-                # For now, skip non-caption tasks in training
-                # TODO: Implement OD loss calculation
-                continue
-            else:
-                # Other tasks: skip for now
-                # TODO: Implement task-specific loss calculation
-                continue
         
         if len(gt_texts) == 0:
             # Skip batch if no valid samples
@@ -179,7 +171,7 @@ def train_one_epoch(
                 truncation=True,
                 max_length=512
             )
-            caption_input_ids = gt_inputs["input_ids"].to(device=device, dtype=torch.long)
+            gt_input_ids = gt_inputs["input_ids"].to(device=device, dtype=torch.long)
         
         # Update batch size for actual processed samples
         actual_batch_size = len(gt_texts)
@@ -189,66 +181,82 @@ def train_one_epoch(
             merged_embeds = merged_embeds[:actual_batch_size]
             attention_mask = attention_mask[:actual_batch_size] if attention_mask is not None else None
         
-        # Get caption embeddings (for teacher forcing)
-        # Florence-2 embedding layer is frozen, so use torch.no_grad()
+        # Get ground truth embeddings (for teacher forcing)
+        # Florence-2 embedding layer is frozen (requires_grad=False) - use no_grad() for memory efficiency
         with torch.no_grad():
-            caption_embeddings = embedding_layer(caption_input_ids)
+            gt_embeddings = embedding_layer(gt_input_ids)
         
         # Extract vision features from merged_embeds (before task prompt)
+        # Note: merged_embeds comes from receiver, which may have trainable modules in future
+        #       So we keep it outside no_grad() to allow gradient flow
         vision_seq_len = merged_embeds.size(1) - text_embeddings.size(1)
         vision_features = merged_embeds[:, :vision_seq_len]
         
-        # Merge vision features with caption embeddings
-        # Full sequence: [vision_features, caption_embeddings]
-        # Note: We exclude task_prompt for training (use caption directly)
+        # Merge vision features with ground truth embeddings
+        # Full sequence: [vision_features, gt_embeddings]
+        # Note: We exclude task_prompt for training (use ground truth directly)
         # Florence-2's _merge_input_ids_with_image_features is frozen (requires_grad=False)
-        # no_grad() is optional but helps with memory efficiency
-        merged_embeds_gt, attention_mask_gt = model._merge_input_ids_with_image_features(
-            vision_features,
-            caption_embeddings
-        )
+        # Use no_grad() for memory efficiency
+        # However, vision_features may come from trainable modules, so we need to be careful
+        with torch.no_grad():
+            merged_embeds_gt, attention_mask_gt = model._merge_input_ids_with_image_features(
+                vision_features,
+                gt_embeddings
+            )
         
         # Create labels for language model
-        # Labels: -100 for vision part, caption tokens for caption part
+        # Labels: -100 for vision part, ground truth tokens for text part
         # For next token prediction, we shift labels by 1
         vision_seq_len = vision_features.size(1)
-        caption_seq_len = caption_input_ids.size(1)
+        gt_seq_len = gt_input_ids.size(1)
         
         labels = torch.full(
-            (actual_batch_size, vision_seq_len + caption_seq_len),
+            (actual_batch_size, vision_seq_len + gt_seq_len),
             -100,
             device=device,
             dtype=torch.long
         )
-        # Set caption labels (vision part stays -100, caption part gets actual tokens)
-        labels[:, vision_seq_len:] = caption_input_ids
+        # Set ground truth labels (vision part stays -100, text part gets actual tokens)
+        labels[:, vision_seq_len:] = gt_input_ids
         
         # Forward through language model
         # Language model is frozen (requires_grad=False)
-        # Use no_grad() for memory efficiency (prevents computation graph creation for frozen LM)
-        # Note: We still need logits for loss computation, but frozen modules won't compute gradients
-        #       The loss.backward() will only compute gradients for trainable modules upstream
+        # IMPORTANT: We need logits for loss computation, and logits need to allow gradient flow
+        #            to trainable modules upstream (compression/decompression).
+        #            Even though language_model is frozen, we should NOT use no_grad() here
+        #            because we need the computation graph for loss.backward() to flow gradients
+        #            to trainable modules in transmitter/receiver.
+        #            The frozen language_model won't compute gradients anyway (requires_grad=False),
+        #            but the computation graph is needed for gradient flow to upstream modules.
         language_model = model.language_model
         
-        with torch.no_grad():
-            outputs = language_model(
-                inputs_embeds=merged_embeds_gt,
-                attention_mask=attention_mask_gt
-            )
+        # Remove no_grad() to allow gradient flow to trainable modules upstream
+        # Frozen modules (requires_grad=False) won't compute gradients, but graph is needed
+        outputs = language_model(
+            inputs_embeds=merged_embeds_gt,
+            attention_mask=attention_mask_gt
+        )
         
         # Get logits and compute loss
+        # Loss: Cross-entropy between language_model output (logits) and ground truth token IDs
+        # This is the standard language model training loss (next token prediction)
         logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
         
         # Shift logits and labels for next token prediction
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
         
-        # Compute loss
+        # Compute loss: Cross-entropy between language_model output (logits) and ground truth token IDs
+        # This is the standard language model training loss (next token prediction).
+        # Loss = CrossEntropy(logits, ground_truth_token_ids)
+        # 
+        # Flow: Receiver output (merged_embeds) -> Language model -> Logits -> Loss with GT token IDs
+        # 
         # Note: All Florence-2 modules are frozen (requires_grad=False), so they won't compute gradients.
         # Currently, no trainable modules exist, so this loss is for monitoring only.
         # Future: When compression/decompression modules are added, they will receive gradients
         #         and can be trained end-to-end. The gradient flow will work automatically since
-        #         we removed no_grad() and detach() from the forward passes.
+        #         we removed no_grad() from language_model forward.
         loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         
@@ -344,9 +352,11 @@ def main(args):
     print("\n=== Initializing Channel ===")
     channel = create_channel(
         channel_type=args.channel_type,
-        effective_snr_db=args.snr_db
+        snr_db=args.snr_db,
+        device=device
     )
-    print(f"Channel type: {args.channel_type}, SNR: {args.snr_db} dB")
+    print(f"Channel type: {args.channel_type}")
+    print(f"SNR: {args.snr_db} dB")
     
     # Initialize Receiver
     # Note: Receiver uses frozen Florence-2 modules (image_pos_embed, image_proj_norm, etc.)
@@ -360,103 +370,92 @@ def main(args):
     print("  Note: All Florence-2 modules used by Receiver are frozen")
     print("  Future: Decompression module (trainable) will be added before image_pos_embed")
     
-    # Load COCO dataset
-    print("\n=== Loading COCO Dataset ===")
+    # Load dataset
+    print("\n=== Loading Dataset ===")
+    data_root = args.data_root if args.data_root else "/data4/hongsik/data/COCO"
+    
     # Use tasks argument (default to ['caption'] if not specified)
     tasks = args.tasks if args.tasks is not None and len(args.tasks) > 0 else ['caption']
     multitask_mode = len(tasks) > 1
     
-    try:
-        if multitask_mode or len(tasks) == 1:
-            # Use COCOMultiTaskDataset for both single and multi-task
-            # Each sample will have its own task_prompt based on task type
-            dataset = COCOMultiTaskDataset(
-                data_root=args.data_root,
-                tasks=tasks,
-                transform=None  # Processor handles preprocessing
-            )
-            if multitask_mode:
-                print(f"Multi-task mode: tasks={tasks}")
-            else:
-                print(f"Single task mode: task={tasks[0]}")
-            print("  Note: Each sample will use task-specific prompt automatically")
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("\nPlease download COCO dataset first:")
+    # Load dataset (no try-except for better performance - let errors propagate)
+    if multitask_mode or len(tasks) == 1:
+        # Use COCOMultiTaskDataset for both single and multi-task
+        # Each sample will have its own task_prompt based on task type
+        dataset = COCOMultiTaskDataset(
+            data_root=data_root,
+            tasks=tasks,
+            transform=None
+        )
         if multitask_mode:
-            download_coco_multitask_info()
+            print(f"Multi-task mode: tasks={tasks}")
         else:
-            download_coco_info()
-        return
+            print(f"Single task mode: task={tasks[0]}")
+        print("  Note: Each sample will use task-specific prompt automatically")
+    else:
+        # Fallback to single-task caption dataset
+        dataset = COCOCaptionDataset(data_root=data_root, transform=None)
+        print("Single task mode: caption (fallback)")
     
+    if multitask_mode:
+        download_coco_multitask_info()
+    else:
+        download_coco_info()
+    
+    # Create dataloader
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True if device.type == 'cuda' else False
+        collate_fn=None  # Use default collate_fn
     )
     
     print(f"Dataset size: {len(dataset)}")
-    print(f"Number of batches: {len(dataloader)}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Number of workers: {args.num_workers}")
     
-    # Setup optimizer
-    # Only train transmitter and receiver (Florence-2 is frozen)
+    # Setup optimizer (currently no trainable parameters)
     # Tx/Rx의 새로 추가된 module만 trainable하게 설정되며, Florence-2에서 가져온 module들은 frozen된 상태를 유지지
-    print("\n=== Setting up Optimizer ===")
-    trainable_params = []
-    
-    # Collect trainable parameters from Transmitter
-    tx_params = [p for p in transmitter.parameters() if p.requires_grad]
-    trainable_params += tx_params
-    tx_num_params = sum(p.numel() for p in tx_params)
-    print(f"  Transmitter trainable parameters: {tx_num_params:,}")
-    
-    # Collect trainable parameters from Receiver
-    rx_params = [p for p in receiver.parameters() if p.requires_grad]
-    trainable_params += rx_params
-    rx_num_params = sum(p.numel() for p in rx_params)
-    print(f"  Receiver trainable parameters: {rx_num_params:,}")
-    
-    # Verify Florence-2 is frozen
+    trainable_params = [p for p in list(transmitter.parameters()) + list(receiver.parameters()) if p.requires_grad]
     florence2_params = [p for p in florence2_model.model.parameters() if p.requires_grad]
     florence2_num_params = sum(p.numel() for p in florence2_model.model.parameters())
-    if len(florence2_params) > 0:
-        print(f"  ⚠ Warning: {len(florence2_params)} Florence-2 parameters are trainable (should be 0)")
-    else:
+    
+    print("\n=== Model Parameters ===")
+    if len(trainable_params) == 0:
+        print("  ✗ No trainable parameters found")
         print(f"  ✓ Florence-2 model is frozen ({florence2_num_params:,} parameters)")
+        optimizer = None
+    else:
+        trainable_num_params = sum(p.numel() for p in trainable_params)
+        print(f"  ✓ Trainable parameters: {trainable_num_params:,}")
+        print(f"  ✓ Florence-2 model is frozen ({florence2_num_params:,} parameters)")
+        optimizer = AdamW(
+            trainable_params,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay
+        )
     
-    total_trainable = sum(p.numel() for p in trainable_params)
-    print(f"  Total trainable parameters: {total_trainable:,}")
-    
-    if total_trainable == 0:
-        print("\n  ℹ Info: No trainable parameters found in Transmitter/Receiver.")
+    if optimizer is None:
         print("  This is expected: Current Tx/Rx only use frozen Florence-2 modules.")
         print("  Future: Compression/decompression modules will be added and will be trainable.")
         print("  Training will run for loss monitoring (no parameter updates until compression modules are added).")
     
-    optimizer = AdamW(
-        trainable_params,
-        lr=args.learning_rate,
-        weight_decay = args.weight_decay
-    ) if total_trainable > 0 else None
-    
-    # Setup scheduler (only if optimizer exists)
-    scheduler = None
+    # Setup learning rate scheduler
     if optimizer is not None:
         scheduler = CosineAnnealingLR(
             optimizer,
-            T_max = args.num_epochs,
-            eta_min = args.learning_rate * 0.01
+            T_max=args.num_epochs,
+            eta_min=args.learning_rate * 0.01
         )
+    else:
+        scheduler = None
     
     # Training loop
     print("\n=== Starting Training ===")
+    best_loss = float('inf')
+    
     for epoch in range(1, args.num_epochs + 1):
-        print(f"\n{'='*70}")
-        print(f"Epoch {epoch}/{args.num_epochs}")
-        print(f"{'='*70}")
-        
         metrics = train_one_epoch(
             transmitter=transmitter,
             receiver=receiver,
@@ -475,35 +474,105 @@ def main(args):
         if scheduler is not None:
             scheduler.step()
         
-        print(f"\nEpoch {epoch} Summary:")
+        # Print epoch summary
+        print(f"\nEpoch {epoch}/{args.num_epochs}")
         print(f"  Loss: {metrics['loss']:.4f}")
-        if optimizer is not None:
-            print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
-        else:
-            print(f"  Learning Rate: N/A (no trainable parameters)")
+        print(f"  Batches: {metrics['num_batches']}")
+        if scheduler is not None:
+            print(f"  Learning rate: {scheduler.get_last_lr()[0]:.6f}")
         
-        # Save checkpoint
-        if epoch % args.save_interval == 0:
-            checkpoint_path = Path(args.output_dir) / f"checkpoint_epoch_{epoch}.pt"
-            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            torch.save({
-                'epoch': epoch,
-                'transmitter_state_dict': transmitter.state_dict(),
-                'receiver_state_dict': receiver.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'loss': metrics['loss'],
-                'mode': args.mode,
-            }, checkpoint_path)
-            print(f"  Checkpoint saved: {checkpoint_path}")
+        # Save checkpoint if best
+        if metrics['loss'] < best_loss:
+            best_loss = metrics['loss']
+            if args.save_dir:
+                save_dir = Path(args.save_dir)
+                save_dir.mkdir(parents=True, exist_ok=True)
+                checkpoint = {
+                    'epoch': epoch,
+                    'transmitter_state_dict': transmitter.state_dict(),
+                    'receiver_state_dict': receiver.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else None,
+                    'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                    'loss': metrics['loss'],
+                    'mode': args.mode,
+                    'tasks': tasks
+                }
+                checkpoint_path = save_dir / f"checkpoint_epoch_{epoch}.pt"
+                torch.save(checkpoint, checkpoint_path)
+                print(f"  ✓ Saved checkpoint: {checkpoint_path}")
     
     print("\n=== Training Complete ===")
+    print(f"Best loss: {best_loss:.4f}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Train semantic communication system with COCO dataset"
+    parser = argparse.ArgumentParser(description="Train semantic communication pipeline with Florence-2")
+    
+    # Data arguments
+    parser.add_argument(
+        '--data_root',
+        type=str,
+        default=None,
+        help='Root directory of COCO dataset (default: /data4/hongsik/data/COCO)'
+    )
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=4,
+        help='Batch size for training'
+    )
+    parser.add_argument(
+        '--num_workers',
+        type=int,
+        default=4,
+        help='Number of data loading workers'
+    )
+    
+    # Training arguments
+    parser.add_argument(
+        '--num_epochs',
+        type=int,
+        default=200,
+        help='Number of training epochs'
+    )
+    parser.add_argument(
+        '--learning_rate',
+        type=float,
+        default=1e-3,
+        help='Learning rate'
+    )
+    parser.add_argument(
+        '--weight_decay',
+        type=float,
+        default=1e-4,
+        help='Weight decay'
+    )
+    parser.add_argument(
+        '--accumulation_steps',
+        type=int,
+        default=1,
+        help='Gradient accumulation steps'
+    )
+    
+    # Channel arguments
+    parser.add_argument(
+        '--channel_type',
+        type=str,
+        default='awgn',
+        choices=['noiseless', 'awgn'],
+        help='Channel type'
+    )
+    parser.add_argument(
+        '--snr_db',
+        type=float,
+        default=10.0,
+        help='SNR in dB for AWGN channel'
+    )
+    parser.add_argument(
+        '--use_channel',
+        type=bool,
+        default=True,
+        help='Whether to use channel noise during training'
     )
     
     # Model arguments
@@ -521,95 +590,22 @@ if __name__ == "__main__":
         help='Processing mode'
     )
     
-    # Data arguments
-    parser.add_argument(
-        '--data_root',
-        type=str,
-        default='/data4/hongsik/data/COCO',
-        help='Root directory of COCO dataset'
-    )
+    # Task arguments
     parser.add_argument(
         '--tasks',
-        type=str,
         nargs='+',
         default=['caption'],
         choices=['caption', 'od', 'detection', 'segmentation', 'keypoints'],
         help='List of tasks for training (e.g., --tasks caption for single task, --tasks caption od for multi-task). Each sample will use task-specific prompt automatically based on its task type.'
     )
-    parser.add_argument(
-        '--batch_size',
-        type=int,
-        default=4,
-        help='Batch size'
-    )
-    parser.add_argument(
-        '--num_workers',
-        type=int,
-        default=4,
-        help='Number of data loading workers'
-    )
     
-    # Training arguments
+    # Other arguments
     parser.add_argument(
-        '--num_epochs',
-        type=int,
-        default = 200,
-        help='Number of training epochs'
-    )
-    parser.add_argument(
-        '--learning_rate',
-        type=float,
-        default=1e-3,
-        help='Learning rate'
-    )
-    parser.add_argument(
-        '--weight_decay',
-        type=float,
-        default = 1e-4,
-        help='Weight decay'
-    )
-    parser.add_argument(
-        '--accumulation_steps',
-        type=int,
-        default=1,
-        help='Gradient accumulation steps'
-    )
-    
-    # Channel arguments
-    parser.add_argument(
-        '--channel_type',
+        '--save_dir',
         type=str,
-        default='awgn',
-        choices=['noiseless', 'awgn', 'rayleigh'],
-        help='Channel type for training'
-    )
-    parser.add_argument(
-        '--snr_db',
-        type=float,
-        default=20.0,
-        help='SNR in dB for channel'
-    )
-    parser.add_argument(
-        '--use_channel',
-        action='store_true',
-        help='Use channel (add noise) during training'
-    )
-    
-    # Output arguments
-    parser.add_argument(
-        '--output_dir',
-        type=str,
-        default='./checkpoints',
+        default=None,
         help='Directory to save checkpoints'
     )
-    parser.add_argument(
-        '--save_interval',
-        type=int,
-        default=1,
-        help='Save checkpoint every N epochs'
-    )
-    
-    # Device arguments
     parser.add_argument(
         '--cpu',
         action='store_true',
