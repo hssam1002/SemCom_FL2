@@ -78,9 +78,7 @@ def test_semantic_communication(
         transmitter = Transmitter(
             florence2_model=florence2_model,
             mode=mode,
-            task_embedding_dim=768,
-            include_linear_embedding=False,
-            use_pooled_features=False
+            task_embedding_dim=768
         ).to(device)
         print("✓ Transmitter initialized")
     except Exception as e:
@@ -109,8 +107,7 @@ def test_semantic_communication(
     try:
         receiver = Receiver(
             florence2_model=florence2_model,
-            mode=mode,  # Use same mode as transmitter
-            use_pooled_features=False
+            mode=mode  # Use same mode as transmitter
         ).to(device)
         print("✓ Receiver initialized")
     except Exception as e:
@@ -291,17 +288,33 @@ def test_semantic_communication(
             traceback.print_exc()
         
         # Print comparison
-        print(f"\n  [Receiver Result]")
+        print(f"\n  [Receiver Result] (Channel: {channel_type.upper()}, SNR: {snr_db} dB)")
         if receiver_result is not None:
             for key, value in receiver_result.items():
-                print(f"    {key}: {value}")
+                if isinstance(value, dict):
+                    print(f"    {key}:")
+                    for sub_key, sub_val in value.items():
+                        if isinstance(sub_val, list) and len(sub_val) > 0 and isinstance(sub_val[0], list):
+                            print(f"      {sub_key}: {len(sub_val)} items")
+                        else:
+                            print(f"      {sub_key}: {sub_val}")
+                else:
+                    print(f"    {key}: {value}")
         else:
             print(f"    (Failed to generate)")
         
-        print(f"\n  [Reference Result]")
+        print(f"\n  [Reference Result] (Noiseless)")
         if reference_result is not None:
             for key, value in reference_result.items():
-                print(f"    {key}: {value}")
+                if isinstance(value, dict):
+                    print(f"    {key}:")
+                    for sub_key, sub_val in value.items():
+                        if isinstance(sub_val, list) and len(sub_val) > 0 and isinstance(sub_val[0], list):
+                            print(f"      {sub_key}: {len(sub_val)} items")
+                        else:
+                            print(f"      {sub_key}: {sub_val}")
+                else:
+                    print(f"    {key}: {value}")
         else:
             print(f"    (Failed to generate)")
         
@@ -310,11 +323,9 @@ def test_semantic_communication(
         if receiver_result is not None and reference_result is not None:
             # Compare dictionaries
             if receiver_result == reference_result:
-                print(f"  ✓ Results match! Semantic communication pipeline works correctly.")
+                print(f"  ✓ Results match! (Channel noise did not affect output)")
             else:
-                print(f"  ⚠ Results differ:")
-                print(f"    Receiver: {receiver_result}")
-                print(f"    Reference: {reference_result}")
+                print(f"  ⚠ Results differ (Channel noise affected output):")
                 
                 # Show detailed differences
                 if isinstance(receiver_result, dict) and isinstance(reference_result, dict):
@@ -324,8 +335,22 @@ def test_semantic_communication(
                         ref_val = reference_result.get(key)
                         if rx_val != ref_val:
                             print(f"      {key}:")
-                            print(f"        Receiver:  {rx_val}")
-                            print(f"        Reference: {ref_val}")
+                            if isinstance(rx_val, str) and isinstance(ref_val, str):
+                                # For strings, show character-level comparison
+                                print(f"        Receiver:  {rx_val[:100]}{'...' if len(rx_val) > 100 else ''}")
+                                print(f"        Reference: {ref_val[:100]}{'...' if len(ref_val) > 100 else ''}")
+                            elif isinstance(rx_val, dict) and isinstance(ref_val, dict):
+                                # For dicts, show key differences
+                                rx_keys = set(rx_val.keys())
+                                ref_keys = set(ref_val.keys())
+                                if rx_keys != ref_keys:
+                                    print(f"          Keys differ: Receiver={rx_keys}, Reference={ref_keys}")
+                                for sub_key in rx_keys & ref_keys:
+                                    if rx_val[sub_key] != ref_val[sub_key]:
+                                        print(f"          {sub_key}: Receiver={rx_val[sub_key]}, Reference={ref_val[sub_key]}")
+                            else:
+                                print(f"        Receiver:  {rx_val}")
+                                print(f"        Reference: {ref_val}")
         else:
             print(f"  ⚠ Could not compare results (generation failed)")
     

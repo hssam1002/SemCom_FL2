@@ -76,9 +76,7 @@ def main(args):
     transmitter = Transmitter(
         florence2_model=florence2_model,
         mode=args.mode,
-        task_embedding_dim=args.task_embedding_dim,
-        include_linear_embedding=args.include_linear_embedding,
-        use_pooled_features=args.use_pooled_features
+        task_embedding_dim=args.task_embedding_dim
     ).to(device)
     print(f"Transmitter mode: {args.mode}")
     print(f"Transmitter output dimension: {transmitter.get_output_dim()}")
@@ -96,8 +94,7 @@ def main(args):
     print("\n=== Initializing Receiver ===")
     receiver = Receiver(
         florence2_model=florence2_model,
-        mode=args.mode,
-        use_pooled_features=args.use_pooled_features
+        mode=args.mode
     ).to(device)
     
     # Load and preprocess image
@@ -306,16 +303,6 @@ if __name__ == "__main__":
     )
     
     # Transmitter arguments
-    parser.add_argument(
-        '--include_linear_embedding',
-        action='store_true',
-        help='Include linear embedding to match task embedding dimension'
-    )
-    parser.add_argument(
-        '--use_pooled_features',
-        action='store_true',
-        help='Use pooled features (CLS token) instead of full sequence'
-    )
     
     # Channel arguments
     parser.add_argument(

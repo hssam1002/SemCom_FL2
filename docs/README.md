@@ -16,12 +16,9 @@
 
 ### Tokenization 관련
 - **tokenization_difference_summary.md**: Tokenization 차이 요약 (최종 정리) ⭐
-- **tokenization_difference_explanation.md**: Tokenization 차이 상세 설명
-- **tokenization_analysis.md**: Tokenization 차이 분석 (초기 분석)
 
 ### Text Embedding 관련
 - **TEXT_EMBEDDING_SHARING_UPDATE.md**: Text embedding 공유 구조 업데이트 내역
-- **dummy_image_text_embedding_result.md**: Dummy image 사용 시 text embedding 동일성 검증 결과
 
 ### 리소스
 - **assets/Florence-2-Diagram.png**: Florence-2 아키텍처 다이어그램
@@ -31,10 +28,12 @@
 
 1. **TEST_GUIDE.md**: 테스트 스크립트 사용법 이해
 2. **README_TRAINING.md**: Training 시작하기
-3. **TRAINING_ARCHITECTURE.md**: Training 아키텍처 이해 (Frozen components)
-4. **COMPRESSION_POINT_COMPARISON.md**: 압축 지점 선택 이유 이해
-5. **tokenization_difference_summary.md**: Tokenization 차이 핵심 이해
-6. **TEXT_EMBEDDING_SHARING_UPDATE.md**: Text embedding 공유 구조 이해
+3. **MULTITASK_TRAINING.md**: Multi-task training 가이드
+4. **FLORENCE2_TASKS.md**: Florence-2 지원 tasks 및 COCO dataset 호환성
+5. **TRAINING_ARCHITECTURE.md**: Training 아키텍처 이해 (Frozen components)
+6. **COMPRESSION_POINT_COMPARISON.md**: 압축 지점 선택 이유 이해
+7. **tokenization_difference_summary.md**: Tokenization 차이 핵심 이해
+8. **TEXT_EMBEDDING_SHARING_UPDATE.md**: Text embedding 공유 구조 이해
 
 ## 추가 정보
 

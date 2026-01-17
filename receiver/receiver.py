@@ -49,20 +49,17 @@ class Receiver(nn.Module):
     Args:
         florence2_model: Florence-2 model instance (frozen)
         mode: Processing mode ('vision_tower' or 'image_proj_norm'), must match transmitter mode
-        use_pooled_features: Whether transmitter used pooled features (deprecated, kept for compatibility)
     """
     
     def __init__(
         self,
         florence2_model: Florence2Model,
-        mode: str = 'vision_tower',
-        use_pooled_features: bool = False
+        mode: str = 'vision_tower'
     ):
         super().__init__()
         
         self.florence2_model = florence2_model
         self.mode = mode
-        self.use_pooled_features = use_pooled_features
         
         # Set dimensions based on mode
         if mode == 'vision_tower':

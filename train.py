@@ -12,13 +12,14 @@ from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 from PIL import Image
-from typing import Dict
+from typing import Dict, Optional
 
 from models.florence2_model import Florence2Model
 from transmitter.transmitter import Transmitter
 from channel.channel import Channel, create_channel
 from receiver.receiver import Receiver
 from data.coco_dataset import COCOCaptionDataset, download_coco_info
+from data.coco_multitask_dataset import COCOMultiTaskDataset, download_coco_multitask_info
 
 
 def train_one_epoch(
@@ -30,9 +31,9 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     mode: str = 'vision_tower',
-    task_prompt: str = "<CAPTION>",
     use_channel: bool = True,
-    accumulation_steps: int = 1
+    accumulation_steps: int = 1,
+    multitask: bool = False  # If True, each sample has its own task_prompt
 ) -> Dict[str, float]:
     """
     Train one epoch on the semantic communication pipeline.
@@ -49,7 +50,6 @@ def train_one_epoch(
         device: Device to run on
         epoch: Current epoch number
         mode: Processing mode ('vision_tower' or 'image_proj_norm')
-        task_prompt: Task prompt for Florence-2
         use_channel: Whether to use channel (add noise) during training
         accumulation_steps: Gradient accumulation steps
     
@@ -81,15 +81,32 @@ def train_one_epoch(
     
     for batch_idx, batch in enumerate(pbar):
         images = batch['image']  # List of PIL Images
-        captions = batch['caption']  # List of captions (ground truth)
         
         batch_size = len(images)
         
-        # Generate text embeddings for task prompt (shared between Tx/Rx)
+        # Get task prompts from batch (each sample has its own task_prompt)
+        # COCOMultiTaskDataset provides 'task_prompt' for each sample
+        if 'task_prompt' in batch:
+            task_prompts = batch['task_prompt']  # List of task prompts (one per sample)
+        else:
+            # Fallback: should not happen with COCOMultiTaskDataset
+            # But keep for compatibility with old COCOCaptionDataset
+            task_prompts = ['<CAPTION>'] * batch_size
+        
+        # Get ground truth data based on task type
+        if multitask and 'task' in batch:
+            tasks = batch['task']
+            ground_truths = batch['ground_truth']  # List of ground truth (varies by task)
+        else:
+            # Single task mode (caption)
+            tasks = ['caption'] * batch_size
+            ground_truths = batch.get('caption', [''] * batch_size)  # Fallback for compatibility
+        
+        # Generate text embeddings for task prompts (shared between Tx/Rx)
         # Florence-2 is frozen, so use torch.no_grad()
         with torch.no_grad():
             inputs = processor(
-                text=[task_prompt] * batch_size,
+                text=task_prompts,
                 images=[dummy_image] * batch_size,
                 return_tensors="pt"
             )
@@ -124,20 +141,52 @@ def train_one_epoch(
         # Future: When decompression module is added, it will receive gradients
         merged_embeds = merged_embeds.detach()
         
-        # Prepare ground truth captions for teacher forcing
-        # Process captions with processor to get input_ids
-        # Note: We process captions with images to get correct tokenization
+        # Prepare ground truth for teacher forcing
+        # For caption task: process text directly
+        # For OD task: convert bboxes+labels to Florence-2 format
+        # Note: Currently only caption task is fully implemented for training
+        #       Other tasks (OD, etc.) will need different loss calculation
+        
+        # Get ground truth text for each sample
+        gt_texts = []
+        for i, (task, gt) in enumerate(zip(tasks, ground_truths)):
+            if task == 'caption':
+                gt_texts.append(gt)
+            elif task == 'od':
+                # For OD task, we'll need to format it properly
+                # For now, skip non-caption tasks in training
+                # TODO: Implement OD loss calculation
+                continue
+            else:
+                # Other tasks: skip for now
+                # TODO: Implement task-specific loss calculation
+                continue
+        
+        if len(gt_texts) == 0:
+            # Skip batch if no valid samples
+            continue
+        
+        # Process ground truth texts with processor to get input_ids
+        # Note: We process with images to get correct tokenization
         # Florence-2 is frozen, so use torch.no_grad() for processing
         with torch.no_grad():
-            caption_inputs = processor(
-                text=captions,
-                images=images,
+            gt_inputs = processor(
+                text=gt_texts,
+                images=images[:len(gt_texts)],
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
                 max_length=512
             )
-            caption_input_ids = caption_inputs["input_ids"].to(device=device, dtype=torch.long)
+            caption_input_ids = gt_inputs["input_ids"].to(device=device, dtype=torch.long)
+        
+        # Update batch size for actual processed samples
+        actual_batch_size = len(gt_texts)
+        if actual_batch_size < batch_size:
+            # Adjust embeddings for reduced batch size
+            text_embeddings = text_embeddings[:actual_batch_size]
+            merged_embeds = merged_embeds[:actual_batch_size]
+            attention_mask = attention_mask[:actual_batch_size] if attention_mask is not None else None
         
         # Get caption embeddings (for teacher forcing)
         # Florence-2 embedding layer is frozen, so use torch.no_grad()
@@ -165,7 +214,7 @@ def train_one_epoch(
         caption_seq_len = caption_input_ids.size(1)
         
         labels = torch.full(
-            (batch_size, vision_seq_len + caption_seq_len),
+            (actual_batch_size, vision_seq_len + caption_seq_len),
             -100,
             device=device,
             dtype=torch.long
@@ -273,9 +322,7 @@ def main(args):
     transmitter = Transmitter(
         florence2_model=florence2_model,
         mode=args.mode,
-        task_embedding_dim=768,
-        include_linear_embedding=False,
-        use_pooled_features=False
+        task_embedding_dim=768
     ).to(device)
     print(f"Transmitter mode: {args.mode}")
     print("  Note: All Florence-2 modules used by Transmitter are frozen")
@@ -295,8 +342,7 @@ def main(args):
     print("\n=== Initializing Receiver ===")
     receiver = Receiver(
         florence2_model=florence2_model,
-        mode=args.mode,
-        use_pooled_features=False
+        mode=args.mode
     ).to(device)
     print(f"Receiver mode: {args.mode}")
     print("  Note: All Florence-2 modules used by Receiver are frozen")
@@ -304,16 +350,31 @@ def main(args):
     
     # Load COCO dataset
     print("\n=== Loading COCO Dataset ===")
+    # Use tasks argument (default to ['caption'] if not specified)
+    tasks = args.tasks if args.tasks is not None and len(args.tasks) > 0 else ['caption']
+    multitask_mode = len(tasks) > 1
+    
     try:
-        dataset = COCOCaptionDataset(
-            data_root=args.data_root,
-            task_prompt=args.task_prompt,
-            transform=None  # Processor handles preprocessing
-        )
+        if multitask_mode or len(tasks) == 1:
+            # Use COCOMultiTaskDataset for both single and multi-task
+            # Each sample will have its own task_prompt based on task type
+            dataset = COCOMultiTaskDataset(
+                data_root=args.data_root,
+                tasks=tasks,
+                transform=None  # Processor handles preprocessing
+            )
+            if multitask_mode:
+                print(f"Multi-task mode: tasks={tasks}")
+            else:
+                print(f"Single task mode: task={tasks[0]}")
+            print("  Note: Each sample will use task-specific prompt automatically")
     except FileNotFoundError as e:
         print(f"Error: {e}")
         print("\nPlease download COCO dataset first:")
-        download_coco_info()
+        if multitask_mode:
+            download_coco_multitask_info()
+        else:
+            download_coco_info()
         return
     
     dataloader = DataLoader(
@@ -364,7 +425,7 @@ def main(args):
     optimizer = AdamW(
         trainable_params,
         lr=args.learning_rate,
-        weight_decay=args.weight_decay
+        weight_decay = args.weight_decay
     ) if total_trainable > 0 else None
     
     # Setup scheduler (only if optimizer exists)
@@ -372,8 +433,8 @@ def main(args):
     if optimizer is not None:
         scheduler = CosineAnnealingLR(
             optimizer,
-            T_max=args.num_epochs,
-            eta_min=args.min_lr
+            T_max = args.num_epochs,
+            eta_min = args.learning_rate * 0.01
         )
     
     # Training loop
@@ -392,9 +453,9 @@ def main(args):
             device=device,
             epoch=epoch,
             mode=args.mode,
-            task_prompt=args.task_prompt,
             use_channel=args.use_channel,
-            accumulation_steps=args.accumulation_steps
+            accumulation_steps=args.accumulation_steps,
+            multitask=multitask_mode
         )
         
         # Update learning rate
@@ -455,10 +516,12 @@ if __name__ == "__main__":
         help='Root directory of COCO dataset'
     )
     parser.add_argument(
-        '--task_prompt',
+        '--tasks',
         type=str,
-        default='<CAPTION>',
-        help='Task prompt for Florence-2'
+        nargs='+',
+        default=['caption'],
+        choices=['caption', 'od', 'detection', 'segmentation', 'keypoints'],
+        help='List of tasks for training (e.g., --tasks caption for single task, --tasks caption od for multi-task). Each sample will use task-specific prompt automatically based on its task type.'
     )
     parser.add_argument(
         '--batch_size',
@@ -477,26 +540,20 @@ if __name__ == "__main__":
     parser.add_argument(
         '--num_epochs',
         type=int,
-        default=10,
+        default = 200,
         help='Number of training epochs'
     )
     parser.add_argument(
         '--learning_rate',
         type=float,
-        default=1e-5,
+        default=1e-3,
         help='Learning rate'
     )
     parser.add_argument(
         '--weight_decay',
         type=float,
-        default=0.01,
+        default = 1e-4,
         help='Weight decay'
-    )
-    parser.add_argument(
-        '--min_lr',
-        type=float,
-        default=1e-7,
-        help='Minimum learning rate for scheduler'
     )
     parser.add_argument(
         '--accumulation_steps',

@@ -35,6 +35,11 @@ Thumbs.db
 *.h5
 *.hdf5
 
+# COCO dataset (should be in /data4/hongsik/data/COCO, not in project root)
+annotations/
+train2017/
+val2017/
+
 # 로그 파일
 *.log
 logs/

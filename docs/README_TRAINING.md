@@ -48,8 +48,8 @@ python train.py \
     --data_root /data4/hongsik/data/COCO \
     --mode vision_tower \
     --batch_size 4 \
-    --num_epochs 10 \
-    --learning_rate 1e-5
+    --num_epochs 200 \
+    --learning_rate 1e-3
 ```
 
 ### Mode 2로 Training
@@ -58,8 +58,8 @@ python train.py \
     --data_root /data4/hongsik/data/COCO \
     --mode image_proj_norm \
     --batch_size 4 \
-    --num_epochs 10 \
-    --learning_rate 1e-5
+    --num_epochs 200 \
+    --learning_rate 1e-3
 ```
 
 ### Channel Noise 포함 Training
@@ -71,7 +71,7 @@ python train.py \
     --snr_db 20.0 \
     --use_channel \
     --batch_size 4 \
-    --num_epochs 10
+    --num_epochs 200
 ```
 
 ### Gradient Accumulation 사용
@@ -80,7 +80,7 @@ python train.py \
     --data_root /data4/hongsik/data/COCO \
     --batch_size 2 \
     --accumulation_steps 4 \
-    --num_epochs 10
+    --num_epochs 200
 ```
 
 ## Training Arguments
@@ -96,10 +96,9 @@ python train.py \
 - `--num_workers`: Data loading workers (default: 4)
 
 ### Training Arguments
-- `--num_epochs`: Number of epochs (default: 10)
-- `--learning_rate`: Learning rate (default: 1e-5)
-- `--weight_decay`: Weight decay (default: 0.01)
-- `--min_lr`: Minimum learning rate for scheduler (default: 1e-7)
+- `--num_epochs`: Number of epochs (default: 200)
+- `--learning_rate`: Learning rate (default: 1e-3)
+- `--weight_decay`: Weight decay (default: 1e-4)
 - `--accumulation_steps`: Gradient accumulation steps (default: 1)
 
 ### Channel Arguments

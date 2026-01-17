@@ -35,25 +35,19 @@ class Transmitter(nn.Module):
         florence2_model: Florence-2 model instance (frozen)
         mode: Processing mode ('vision_tower' or 'image_proj_norm')
         task_embedding_dim: Task embedding dimension (for compatibility, not used)
-        include_linear_embedding: Whether to include linear embedding (for compatibility, not used)
-        use_pooled_features: Whether to use pooled features (deprecated, kept for compatibility)
     """
     
     def __init__(
         self,
         florence2_model: Florence2Model,
         mode: str = 'vision_tower',
-        task_embedding_dim: int = 768,
-        include_linear_embedding: bool = False,
-        use_pooled_features: bool = False
+        task_embedding_dim: int = 768
     ):
         super().__init__()
         
         self.florence2_model = florence2_model
         self.mode = mode
         self.task_embedding_dim = task_embedding_dim
-        self.include_linear_embedding = include_linear_embedding
-        self.use_pooled_features = use_pooled_features
         
         # Get vision encoder output dimension
         self.vision_dim = florence2_model.get_vision_dim()  # 1024 for base model
@@ -68,10 +62,6 @@ class Transmitter(nn.Module):
             self.output_dim = self.projected_dim  # 768
         else:
             raise ValueError(f"Invalid mode: {mode}. Must be 'vision_tower' or 'image_proj_norm'")
-        
-        if include_linear_embedding:
-            print(f"Warning: include_linear_embedding is ignored. Using mode '{mode}' output ({self.output_dim} dim).")
-        self.linear_embedding = None
         
         print(f"Transmitter initialized with mode: {mode} (output_dim: {self.output_dim})")
     
@@ -268,11 +258,9 @@ class Transmitter(nn.Module):
         """
         output_dim = self.get_output_dim()  # 1024
         
-        if self.use_pooled_features:
-            return (batch_size, output_dim)
-        else:
-            # Calculate number of patches
-            # DaViT typically uses patch size 16
-            patch_size = 16
-            num_patches = (image_size[0] // patch_size) * (image_size[1] // patch_size)
-            return (batch_size, num_patches, output_dim)
+        # Calculate number of patches
+        # DaViT typically uses patch size 16
+        patch_size = 16
+        num_patches = (image_size[0] // patch_size) * (image_size[1] // patch_size)
+        return (batch_size, num_patches, output_dim)
+        
