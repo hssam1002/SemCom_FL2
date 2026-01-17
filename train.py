@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image
 from typing import Dict, Optional
 
-from models.florence2_model import Florence2Model
+from models.florence2_model import Florence2Model, get_vision_encoder_output_dim
 from transmitter.transmitter import Transmitter
 from channel.channel import Channel, create_channel
 from receiver.receiver import Receiver
@@ -103,7 +103,8 @@ def train_one_epoch(
             ground_truths = batch.get('caption', [''] * batch_size)  # Fallback for compatibility
         
         # Generate text embeddings for task prompts (shared between Tx/Rx)
-        # Florence-2 is frozen, so use torch.no_grad()
+        # Florence-2 processor and embedding layer are frozen (requires_grad=False)
+        # Use no_grad() for memory efficiency (prevents computation graph creation)
         with torch.no_grad():
             inputs = processor(
                 text=task_prompts,
@@ -115,14 +116,14 @@ def train_one_epoch(
         
         # Transmitter: Process images
         # Note: Transmitter uses frozen Florence-2 vision_tower internally
-        # All Florence-2 modules (vision_tower, etc.) are frozen
+        # All Florence-2 modules (vision_tower, etc.) are frozen (requires_grad=False)
+        # Since Florence-2 modules are frozen, no_grad() is optional but helps with memory efficiency
         # Future: Compression module (trainable) will be added here:
         #   vision_tower (frozen) → compression_module (trainable) → output
-        with torch.no_grad():
-            tx_output = transmitter(images)  # (batch, seq_len, dim)
-        # Detach to ensure no gradients flow to frozen Florence-2
-        # Future: When compression module is added, it will receive gradients
-        tx_output = tx_output.detach()
+        # When compression module is added, remove no_grad() and detach() to allow gradient flow
+        tx_output = transmitter(images)  # (batch, seq_len, dim)
+        # Note: No detach() needed - frozen modules (requires_grad=False) won't compute gradients anyway
+        # When compression module is added, this will allow gradients to flow to it
         
         # Channel: Add noise (if enabled)
         if use_channel:
@@ -132,14 +133,14 @@ def train_one_epoch(
         
         # Receiver: Process received signal and merge with text embeddings
         # Note: Receiver uses frozen Florence-2 modules (image_pos_embed, image_proj_norm, etc.)
-        # All Florence-2 modules are frozen
+        # All Florence-2 modules are frozen (requires_grad=False)
+        # Since Florence-2 modules are frozen, no_grad() is optional but helps with memory efficiency
         # Future: Decompression module (trainable) will be added here:
         #   received → decompression_module (trainable) → image_pos_embed (frozen) → ...
-        with torch.no_grad():
-            merged_embeds, attention_mask = receiver(received_signal, text_embeddings)
-        # Detach to ensure no gradients flow to frozen Florence-2
-        # Future: When decompression module is added, it will receive gradients
-        merged_embeds = merged_embeds.detach()
+        # When decompression module is added, remove no_grad() to allow gradient flow
+        merged_embeds, attention_mask = receiver(received_signal, text_embeddings)
+        # Note: No detach() needed - frozen modules (requires_grad=False) won't compute gradients anyway
+        # When decompression module is added, this will allow gradients to flow to it
         
         # Prepare ground truth for teacher forcing
         # For caption task: process text directly
@@ -200,12 +201,12 @@ def train_one_epoch(
         # Merge vision features with caption embeddings
         # Full sequence: [vision_features, caption_embeddings]
         # Note: We exclude task_prompt for training (use caption directly)
-        # Florence-2's _merge_input_ids_with_image_features is frozen
-        with torch.no_grad():
-            merged_embeds_gt, attention_mask_gt = model._merge_input_ids_with_image_features(
-                vision_features,
-                caption_embeddings
-            )
+        # Florence-2's _merge_input_ids_with_image_features is frozen (requires_grad=False)
+        # no_grad() is optional but helps with memory efficiency
+        merged_embeds_gt, attention_mask_gt = model._merge_input_ids_with_image_features(
+            vision_features,
+            caption_embeddings
+        )
         
         # Create labels for language model
         # Labels: -100 for vision part, caption tokens for caption part
@@ -223,7 +224,10 @@ def train_one_epoch(
         labels[:, vision_seq_len:] = caption_input_ids
         
         # Forward through language model
-        # Language model is frozen, compute logits without gradients
+        # Language model is frozen (requires_grad=False)
+        # Use no_grad() for memory efficiency (prevents computation graph creation for frozen LM)
+        # Note: We still need logits for loss computation, but frozen modules won't compute gradients
+        #       The loss.backward() will only compute gradients for trainable modules upstream
         language_model = model.language_model
         
         with torch.no_grad():
@@ -240,10 +244,11 @@ def train_one_epoch(
         shift_labels = labels[..., 1:].contiguous()
         
         # Compute loss
-        # Note: Since all Florence-2 modules are frozen and we detached intermediate outputs,
-        # this loss is for monitoring only.
+        # Note: All Florence-2 modules are frozen (requires_grad=False), so they won't compute gradients.
+        # Currently, no trainable modules exist, so this loss is for monitoring only.
         # Future: When compression/decompression modules are added, they will receive gradients
-        #         and can be trained end-to-end.
+        #         and can be trained end-to-end. The gradient flow will work automatically since
+        #         we removed no_grad() and detach() from the forward passes.
         loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         
@@ -299,6 +304,13 @@ def main(args):
         model_name=args.model_name,
         device=device
     )
+    
+    # Print vision encoder output dimension based on mode
+    vision_dim = get_vision_encoder_output_dim(
+        model_size=args.model_name.split('/')[-1].split('-')[-1],  # Extract 'base' or 'large'
+        mode=args.mode
+    )
+    print(f"Vision encoder output dimension (mode={args.mode}): {vision_dim}")
     
     # Freeze Florence-2 pre-trained model (always frozen)
     # Note: All Florence-2 modules (vision_tower, image_pos_embed, image_proj_norm, language_model, etc.)
@@ -390,6 +402,7 @@ def main(args):
     
     # Setup optimizer
     # Only train transmitter and receiver (Florence-2 is frozen)
+    # Tx/Rx의 새로 추가된 module만 trainable하게 설정되며, Florence-2에서 가져온 module들은 frozen된 상태를 유지지
     print("\n=== Setting up Optimizer ===")
     trainable_params = []
     

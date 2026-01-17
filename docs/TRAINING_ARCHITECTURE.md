@@ -56,9 +56,21 @@ Channel → Receiver:
 ## Implementation Notes
 
 1. **Florence-2 Freezing**: All parameters in `florence2_model.model` are set to `requires_grad=False`
-2. **Forward Pass**: Frozen modules are called with `torch.no_grad()` and outputs are detached
-3. **Gradient Flow**: When compression modules are added, they will receive gradients from the loss
+2. **Forward Pass**: 
+   - Frozen modules (requires_grad=False) don't need `torch.no_grad()` or `detach()` to prevent gradients
+   - However, `no_grad()` can be used for memory efficiency (prevents computation graph creation)
+   - Current implementation: `no_grad()` and `detach()` are removed to prepare for future trainable modules
+3. **Gradient Flow**: 
+   - Frozen modules (requires_grad=False) automatically won't compute gradients
+   - When compression modules are added, gradients will flow to them automatically
 4. **Optimizer**: Only trainable parameters (compression modules) will be included in optimizer
+
+## requires_grad=False vs torch.no_grad()
+
+- **requires_grad=False**: Parameter is frozen, but computation graph is still created (can use more memory)
+- **torch.no_grad()**: Prevents computation graph creation entirely (more memory efficient)
+- **Both prevent gradients**, but `no_grad()` is more efficient for frozen modules
+- **For future trainable modules**: Remove `no_grad()` and `detach()` to allow gradient flow
 
 ## Adding Compression Modules
 

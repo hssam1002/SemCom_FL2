@@ -27,9 +27,10 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     print(f"Using device: {device}")
     
-    # Get vision encoder output dimension
-    vision_dim = get_vision_encoder_output_dim(args.model_size)
-    print(f"Vision encoder output dimension: {vision_dim}")
+    # Get vision encoder output dimension based on mode
+    model_size = args.model_name.split('/')[-1].split('-')[-1]  # Extract 'base' or 'large'
+    vision_dim = get_vision_encoder_output_dim(model_size=model_size, mode=args.mode)
+    print(f"Vision encoder output dimension (mode={args.mode}): {vision_dim}")
     
     # Initialize Florence-2 model
     print("\n=== Initializing Florence-2 Model ===")

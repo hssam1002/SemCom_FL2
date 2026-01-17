@@ -19,33 +19,47 @@ except ImportError:
     )
 
 
-def get_vision_encoder_output_dim(model_size: str = "base") -> int:
+def get_vision_encoder_output_dim(model_size: str = "base", mode: Optional[str] = None) -> int:
     """
-    Get the output dimension of Florence-2's vision encoder (DaViT).
+    Get the output dimension based on model size and processing mode.
     
     Args:
         model_size: Model size ('base', 'large')
+        mode: Processing mode ('vision_tower' or 'image_proj_norm')
+              If None, returns vision_tower dimension
         
     Returns:
-        Output dimension of vision encoder
+        Output dimension:
+        - vision_tower mode: 1024 (base) or 1024 (large) - vision_tower output
+        - image_proj_norm mode: 768 - after image projection and normalization
+        - If mode is None: returns vision_tower dimension
         
     Note:
-        - Florence-2-base uses DaViT-base with output dimension 768
-        - Florence-2-large uses DaViT-large with output dimension 1024
+        - Florence-2-base vision_tower output: 1024
+        - Florence-2-large vision_tower output: 1024
+        - image_proj_norm output: 768 (always, regardless of model size)
     """
-    dim_map = {
-        'base': 768,
+    # Vision tower output dimension (before projection)
+    vision_tower_dim_map = {
+        'base': 1024,
         'large': 1024,
-        'florence-2-base': 768,
+        'florence-2-base': 1024,
         'florence-2-large': 1024,
     }
     
-    model_size_lower = model_size.lower()
-    if model_size_lower in dim_map:
-        return dim_map[model_size_lower]
+    # Image projection output dimension (after projection and norm)
+    image_proj_dim = 768  # Always 768 regardless of model size
     
-    # Default to base
-    return 768
+    if mode == 'image_proj_norm':
+        return image_proj_dim
+    elif mode == 'vision_tower' or mode is None:
+        model_size_lower = model_size.lower()
+        if model_size_lower in vision_tower_dim_map:
+            return vision_tower_dim_map[model_size_lower]
+        # Default to base
+        return 1024
+    else:
+        raise ValueError(f"Invalid mode: {mode}. Must be 'vision_tower' or 'image_proj_norm'")
 
 
 class Florence2Model(nn.Module):
@@ -129,15 +143,17 @@ class Florence2Model(nn.Module):
             self.text_encoder = None
             self.text_decoder = None
         
-        # Get output dimension
-        # Florence-2-base uses DaViT-base: output dim = 768
-        # Florence-2-large uses DaViT-large: output dim = 1024
+        # Get vision_tower output dimension
+        # Florence-2-base uses DaViT-base: vision_tower output dim = 1024
+        # Florence-2-large uses DaViT-large: vision_tower output dim = 1024
+        # Note: Both base and large models have vision_tower output of 1024
+        #       The difference is in the number of layers, not output dimension
         if 'large' in model_name.lower():
             self.vision_dim = 1024
         else:
-            self.vision_dim = 768
+            self.vision_dim = 1024  # Base model also outputs 1024 from vision_tower
         
-        print(f"Vision encoder output dimension: {self.vision_dim}")
+        print(f"Vision encoder (vision_tower) output dimension: {self.vision_dim}")
     
     def encode_image(
         self,
